@@ -27,16 +27,23 @@ pub enum Item {
     Link(Link),
     /// A place in the document; draws nothing.
     Mark(Mark),
+    /// A rounded box, or a border that is not solid.
+    Shape(Shape),
 }
 
 impl Item {
     pub(crate) fn translate(mut self, dx: f32, dy: f32) -> Self {
+        if let Item::Shape(shape) = &mut self {
+            shape.translate(dx, dy);
+            return self;
+        }
         let origin = match &mut self {
             Item::Text(run) => &mut run.origin,
             Item::Fill(fill) => &mut fill.rect.origin,
             Item::Image(image) => &mut image.rect.origin,
             Item::Link(link) => &mut link.rect.origin,
             Item::Mark(mark) => &mut mark.origin,
+            Item::Shape(_) => unreachable!("translated above"),
         };
         origin.x += dx;
         origin.y += dy;
@@ -76,6 +83,65 @@ pub enum MarkKind {
     /// A heading (`<h1>` to `<h6>`), for the PDF outline and the
     /// `[section]` header variables.
     Heading { level: u8, title: Arc<str> },
+}
+
+/// A filled or stroked outline.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Shape {
+    pub path: Vec<PathOp>,
+    pub paint: ShapePaint,
+    /// If set, only the part inside this polygon is painted.
+    pub clip: Option<Vec<Point>>,
+}
+
+impl Shape {
+    fn translate(&mut self, dx: f32, dy: f32) {
+        let shift = |point: &mut Point| {
+            point.x += dx;
+            point.y += dy;
+        };
+        for op in &mut self.path {
+            match op {
+                PathOp::Move(p) | PathOp::Line(p) => shift(p),
+                PathOp::Cubic(a, b, c) => {
+                    shift(a);
+                    shift(b);
+                    shift(c);
+                }
+                PathOp::Close => {}
+            }
+        }
+        for point in self.clip.iter_mut().flatten() {
+            shift(point);
+        }
+    }
+}
+
+/// One step of a [`Shape`]'s path.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum PathOp {
+    Move(Point),
+    Line(Point),
+    /// A cubic Bézier curve: two control points, then the end point.
+    Cubic(Point, Point, Point),
+    Close,
+}
+
+/// How a [`Shape`] is painted.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ShapePaint {
+    /// Filled. With `even_odd`, a path inside another cuts a hole (a
+    /// ring).
+    Fill { color: Color, even_odd: bool },
+    /// Stroked `width` wide, along the path's centre. With `dash`, in
+    /// dashes and gaps of those lengths; with `round`, dashes get round
+    /// caps, and zero-length ones are dots.
+    Stroke {
+        color: Color,
+        width: f32,
+        dash: Option<(f32, f32)>,
+        round: bool,
+    },
 }
 
 /// A filled rectangle: a background or one edge of a border.

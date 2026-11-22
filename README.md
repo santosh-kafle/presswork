@@ -27,7 +27,8 @@ maintained, and accepts the same command line.
   - text decoration: `text-decoration` (underline, overline and
     line-through, drawn solid), `text-decoration-line`,
     `text-decoration-color`
-  - boxes: `display`, `margin`, `padding`, `border` (drawn solid), `width`,
+  - boxes: `display`, `margin`, `padding`, `border` (solid, dashed, dotted
+    and double; other styles are drawn solid), `border-radius`, `width`,
     `max-width`, `height`, `min-height`, `max-height`, `box-sizing`,
     `background-color`
   - inline elements: `background-color`, `border`, `padding` and

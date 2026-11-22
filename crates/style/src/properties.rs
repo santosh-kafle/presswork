@@ -303,6 +303,26 @@ pub enum LineHeight {
     Percent(f32),
 }
 
+/// A corner of a box, for `border-radius`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Corner {
+    TopLeft,
+    TopRight,
+    BottomRight,
+    BottomLeft,
+}
+
+impl Corner {
+    /// In the order `border-radius` lists them, which is also their index
+    /// in `ComputedStyle::border_radius`.
+    pub const ALL: [Corner; 4] = [
+        Corner::TopLeft,
+        Corner::TopRight,
+        Corner::BottomRight,
+        Corner::BottomLeft,
+    ];
+}
+
 /// One part of a `content` value.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ContentItem {
@@ -385,6 +405,7 @@ pub enum LonghandId {
     CounterReset,
     CounterIncrement,
     CounterSet,
+    BorderRadius(Corner),
 }
 
 impl LonghandId {
@@ -399,7 +420,7 @@ impl LonghandId {
             | BorderStyle(_) | BorderColor(_) | Width | Height | MaxWidth | MaxHeight
             | MinHeight | BoxSizing | VerticalAlign | BreakBefore | BreakAfter
             | TextDecorationLine | TextDecorationColor | BreakInside | TableLayout | Content
-            | CounterReset | CounterIncrement | CounterSet => false,
+            | CounterReset | CounterIncrement | CounterSet | BorderRadius(_) => false,
         }
     }
 
@@ -453,7 +474,8 @@ impl LonghandId {
                 BorderColor(side),
             ]
         });
-        simple.into_iter().chain(sided)
+        let corners = Corner::ALL.into_iter().map(BorderRadius);
+        simple.into_iter().chain(sided).chain(corners)
     }
 }
 
@@ -510,6 +532,8 @@ pub enum PropertyDeclaration {
     CounterReset(CounterChanges),
     CounterIncrement(CounterChanges),
     CounterSet(CounterChanges),
+    /// Horizontal and vertical radius.
+    BorderRadius(Corner, Dim, Dim),
     /// `inherit`, `initial` or `unset` for the given property.
     CssWide(LonghandId, CssWide),
 }
@@ -560,6 +584,7 @@ impl PropertyDeclaration {
             D::CounterReset(_) => LonghandId::CounterReset,
             D::CounterIncrement(_) => LonghandId::CounterIncrement,
             D::CounterSet(_) => LonghandId::CounterSet,
+            D::BorderRadius(corner, ..) => LonghandId::BorderRadius(*corner),
             D::CssWide(id, _) => *id,
         }
     }
@@ -625,6 +650,11 @@ pub fn longhands_of(name: &str) -> Option<Vec<LonghandId>> {
         "counter-reset" => one(L::CounterReset),
         "counter-increment" => one(L::CounterIncrement),
         "counter-set" => one(L::CounterSet),
+        "border-radius" => Some(Corner::ALL.map(L::BorderRadius).to_vec()),
+        "border-top-left-radius" => one(L::BorderRadius(Corner::TopLeft)),
+        "border-top-right-radius" => one(L::BorderRadius(Corner::TopRight)),
+        "border-bottom-right-radius" => one(L::BorderRadius(Corner::BottomRight)),
+        "border-bottom-left-radius" => one(L::BorderRadius(Corner::BottomLeft)),
         "min-height" => one(L::MinHeight),
         "text-decoration-line" => one(L::TextDecorationLine),
         "text-decoration-color" => one(L::TextDecorationColor),
@@ -713,6 +743,7 @@ pub fn parse_declaration(
         "background" => out.push(D::BackgroundColor(parse_background(input))),
         "list-style" => out.push(D::ListStyleType(parse_list_style(input))),
         "text-decoration" => parse_text_decoration(input, out)?,
+        "border-radius" => parse_border_radius(input, out)?,
         _ => out.push(parse_longhand(longhands[0], input)?),
     }
     input.expect_exhausted().map_err(Invalid::from)
@@ -770,6 +801,13 @@ fn parse_longhand(id: LonghandId, input: &mut Parser<'_>) -> Parsed<PropertyDecl
         L::CounterReset => D::CounterReset(parse_counter_changes(input, 0)?),
         L::CounterIncrement => D::CounterIncrement(parse_counter_changes(input, 1)?),
         L::CounterSet => D::CounterSet(parse_counter_changes(input, 0)?),
+        L::BorderRadius(corner) => {
+            let horizontal = Dim::parse(input, false, false)?;
+            let vertical = input
+                .try_parse(|i| Dim::parse(i, false, false))
+                .unwrap_or(horizontal);
+            D::BorderRadius(corner, horizontal, vertical)
+        }
     })
 }
 
@@ -1160,6 +1198,42 @@ fn parse_spacing(input: &mut Parser<'_>) -> Parsed<Length> {
     Length::parse(input)
 }
 
+/// `border-radius`: one to four horizontal radii, optionally `/` and one
+/// to four vertical ones, assigned to the corners clockwise from the top
+/// left.
+fn parse_border_radius(input: &mut Parser<'_>, out: &mut Vec<PropertyDeclaration>) -> Parsed<()> {
+    let radii = |input: &mut Parser<'_>| -> Parsed<[Dim; 4]> {
+        let mut values = vec![Dim::parse(input, false, false)?];
+        while values.len() < 4 {
+            match input.try_parse(|i| Dim::parse(i, false, false)) {
+                Ok(value) => values.push(value),
+                Err(Invalid) => break,
+            }
+        }
+        Ok(match values[..] {
+            [a] => [a, a, a, a],
+            [a, b] => [a, b, a, b],
+            [a, b, c] => [a, b, c, b],
+            [a, b, c, d] => [a, b, c, d],
+            _ => unreachable!("one to four values"),
+        })
+    };
+    let horizontal = radii(input)?;
+    let vertical = if input.try_parse(|i| i.expect_delim('/')).is_ok() {
+        radii(input)?
+    } else {
+        horizontal
+    };
+    for (index, corner) in Corner::ALL.into_iter().enumerate() {
+        out.push(PropertyDeclaration::BorderRadius(
+            corner,
+            horizontal[index],
+            vertical[index],
+        ));
+    }
+    Ok(())
+}
+
 /// `content`: `normal`, `none`, or strings, counters, attributes and
 /// quotes. Images are not supported.
 fn parse_content(input: &mut Parser<'_>) -> Parsed<Content> {
@@ -1294,6 +1368,30 @@ mod tests {
         let mut out = Vec::new();
         parse_declaration(name, &mut parser, &mut out)?;
         Ok(out)
+    }
+
+    #[test]
+    fn parses_border_radius() {
+        let pt = |v: f32| Dim::Length(Length::Pt(v * 0.75));
+        assert_eq!(
+            parse("border-radius", "4px 8px / 2px"),
+            Ok(vec![
+                D::BorderRadius(Corner::TopLeft, pt(4.0), pt(2.0)),
+                D::BorderRadius(Corner::TopRight, pt(8.0), pt(2.0)),
+                D::BorderRadius(Corner::BottomRight, pt(4.0), pt(2.0)),
+                D::BorderRadius(Corner::BottomLeft, pt(8.0), pt(2.0)),
+            ])
+        );
+        assert_eq!(
+            parse("border-bottom-left-radius", "50%"),
+            Ok(vec![D::BorderRadius(
+                Corner::BottomLeft,
+                Dim::Percent(0.5),
+                Dim::Percent(0.5)
+            )])
+        );
+        assert!(parse("border-radius", "-1px").is_err());
+        assert!(parse("border-radius", "1px / ").is_err());
     }
 
     #[test]
@@ -1589,6 +1687,6 @@ mod tests {
         let all: Vec<_> = LonghandId::all().collect();
         let unique: std::collections::HashSet<_> = all.iter().collect();
         assert_eq!(all.len(), unique.len());
-        assert_eq!(all.len(), 36 + 4 * 5);
+        assert_eq!(all.len(), 36 + 4 * 5 + 4);
     }
 }

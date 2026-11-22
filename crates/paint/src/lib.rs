@@ -19,12 +19,13 @@ use krilla::metadata::Metadata;
 use krilla::num::NormalizedF32;
 use krilla::outline::{Outline, OutlineNode};
 use krilla::page::PageSettings;
-use krilla::paint::Fill;
+use krilla::paint::{Fill, FillRule, LineCap, LineJoin, Stroke, StrokeDash};
 use krilla::surface::Surface;
 use krilla::text::{Font, GlyphId, KrillaGlyph};
 use krilla::{Data, Document};
 use presswork_layout::{
-    Color, FontData, Image, ImageData, ImageFormat, Item, Link, LinkTarget, MarkKind, Page, TextRun,
+    Color, FontData, Image, ImageData, ImageFormat, Item, Link, LinkTarget, MarkKind, Page, PathOp,
+    Shape, ShapePaint, TextRun,
 };
 
 /// Document-level options for the generated PDF.
@@ -231,6 +232,7 @@ fn write(
                         surface.draw_path(&path);
                     }
                 }
+                Item::Shape(shape) => draw_shape(&mut surface, shape),
                 Item::Link(link) => links.push(link),
                 Item::Mark(_) => {}
             }
@@ -328,6 +330,79 @@ impl<'a> ImageCache<'a> {
 }
 
 /// Sets the fill color for the drawing operations that follow.
+/// A krilla path from layout's path steps.
+fn build_path(ops: &[PathOp]) -> Option<krilla::geom::Path> {
+    let mut path = PathBuilder::new();
+    for op in ops {
+        match *op {
+            PathOp::Move(p) => path.move_to(p.x, p.y),
+            PathOp::Line(p) => path.line_to(p.x, p.y),
+            PathOp::Cubic(a, b, c) => path.cubic_to(a.x, a.y, b.x, b.y, c.x, c.y),
+            PathOp::Close => path.close(),
+        }
+    }
+    path.finish()
+}
+
+fn draw_shape(surface: &mut Surface<'_>, shape: &Shape) {
+    let Some(path) = build_path(&shape.path) else {
+        return;
+    };
+    let clip = shape.clip.as_ref().and_then(|polygon| {
+        let mut ops = Vec::with_capacity(polygon.len() + 1);
+        for (index, &point) in polygon.iter().enumerate() {
+            ops.push(if index == 0 {
+                PathOp::Move(point)
+            } else {
+                PathOp::Line(point)
+            });
+        }
+        ops.push(PathOp::Close);
+        build_path(&ops)
+    });
+    if let Some(clip) = &clip {
+        surface.push_clip_path(clip, &FillRule::NonZero);
+    }
+    match shape.paint {
+        ShapePaint::Fill { color, even_odd } => {
+            set_color(surface, color);
+            if even_odd && let Some(fill) = surface.get_fill() {
+                let mut fill = fill.clone();
+                fill.rule = FillRule::EvenOdd;
+                surface.set_fill(Some(fill));
+            }
+            surface.draw_path(&path);
+        }
+        ShapePaint::Stroke {
+            color,
+            width,
+            dash,
+            round,
+        } => {
+            let opacity =
+                NormalizedF32::new(f32::from(color.a) / 255.0).unwrap_or(NormalizedF32::ONE);
+            surface.set_fill(None);
+            surface.set_stroke(Some(Stroke {
+                paint: rgb::Color::new(color.r, color.g, color.b).into(),
+                width,
+                miter_limit: 4.0,
+                line_cap: if round { LineCap::Round } else { LineCap::Butt },
+                line_join: LineJoin::Miter,
+                opacity,
+                dash: dash.map(|(dash, gap)| StrokeDash {
+                    array: vec![dash, gap],
+                    offset: 0.0,
+                }),
+            }));
+            surface.draw_path(&path);
+            surface.set_stroke(None);
+        }
+    }
+    if clip.is_some() {
+        surface.pop();
+    }
+}
+
 fn set_color(surface: &mut Surface<'_>, color: Color) {
     let opacity = NormalizedF32::new(f32::from(color.a) / 255.0).unwrap_or(NormalizedF32::ONE);
     surface.set_fill(Some(Fill {
@@ -467,6 +542,18 @@ mod tests {
         assert_eq!(titles(4), 5);
         assert_eq!(titles(2), 4, "A.2.1 is at depth 3");
         assert_eq!(titles(1), 2);
+    }
+
+    #[test]
+    fn draws_rounded_and_dashed_borders() {
+        let pages = pages(
+            "<div style='border:2px dashed red; border-radius:6px'>a</div>
+             <div style='border-style:solid; border-width:3px; border-color:red blue;
+             border-radius:8px; background:#eee'>b</div>
+             <div style='border:3px dotted green'>c</div>",
+        );
+        let pdf = render_pdf(&pages, &PdfOptions::default()).unwrap();
+        assert!(pdf.bytes.starts_with(b"%PDF-"));
     }
 
     #[test]

@@ -10,8 +10,9 @@ use std::ops::Range;
 use presswork_style::{BorderStyle, Color, ComputedStyle, Side, Sides};
 
 use super::{Cell, ColumnElement, Row};
+use crate::flow::border::{MIN_DOUBLE, dashed_line};
 use crate::fragment::{Fill, Item};
-use crate::geometry::Rect;
+use crate::geometry::{Point, Rect};
 
 /// Where a border comes from. Later variants win ties (rule 4 of section
 /// 17.6.2.1): a cell's border beats its row's, and so on down to the
@@ -302,8 +303,10 @@ impl CollapsedBorders {
         xs: &[f32],
         out: &mut Vec<Item>,
     ) {
-        let mut lines: Vec<(f32, Fill)> = Vec::new();
-        let mut fill = |x: f32, y: f32, width: f32, height: f32, edge: Edge| {
+        // Each line's width, rectangle, color, style, and whether it is
+        // horizontal.
+        let mut lines: Vec<(f32, Fill, BorderStyle, bool)> = Vec::new();
+        let mut fill = |x: f32, y: f32, width: f32, height: f32, edge: Edge, horizontal: bool| {
             if let Edge::Border(border) = edge
                 && width > 0.0
                 && height > 0.0
@@ -313,7 +316,7 @@ impl CollapsedBorders {
                     rect: Rect::new(x, y, width, height),
                     color: border.color,
                 };
-                lines.push((border.width, fill));
+                lines.push((border.width, fill, border.style, horizontal));
             }
         };
 
@@ -341,6 +344,7 @@ impl CollapsedBorders {
                     width,
                     heights[k] + up + down,
                     edge,
+                    false,
                 );
             }
         }
@@ -370,11 +374,60 @@ impl CollapsedBorders {
                     xs[column] - reach(column),
                     xs[column + 1] + reach(column + 1),
                 );
-                fill(left, y - width / 2.0, right - left, width, edge);
+                fill(left, y - width / 2.0, right - left, width, edge, true);
             }
         }
         lines.sort_by(|a, b| a.0.total_cmp(&b.0));
-        out.extend(lines.into_iter().map(|(_, fill)| Item::Fill(fill)));
+        for (_, fill, style, horizontal) in lines {
+            styled_line(fill, style, horizontal, out);
+        }
+    }
+}
+
+/// Draws the line filling `fill.rect` in `style`: dashes and dots along
+/// its length, two thin lines for `double`.
+fn styled_line(fill: Fill, style: BorderStyle, horizontal: bool, out: &mut Vec<Item>) {
+    let Rect { origin, size } = fill.rect;
+    let width = if horizontal { size.height } else { size.width };
+    match style {
+        BorderStyle::Dashed | BorderStyle::Dotted => {
+            let (from, to) = if horizontal {
+                let y = origin.y + width / 2.0;
+                (
+                    Point::new(origin.x, y),
+                    Point::new(origin.x + size.width, y),
+                )
+            } else {
+                let x = origin.x + width / 2.0;
+                (
+                    Point::new(x, origin.y),
+                    Point::new(x, origin.y + size.height),
+                )
+            };
+            let dotted = style == BorderStyle::Dotted;
+            dashed_line(out, from, to, width, fill.color, dotted);
+        }
+        BorderStyle::Double if width >= MIN_DOUBLE => {
+            let third = width / 3.0;
+            let stripes = if horizontal {
+                [
+                    Rect::new(origin.x, origin.y, size.width, third),
+                    Rect::new(origin.x, origin.y + 2.0 * third, size.width, third),
+                ]
+            } else {
+                [
+                    Rect::new(origin.x, origin.y, third, size.height),
+                    Rect::new(origin.x + 2.0 * third, origin.y, third, size.height),
+                ]
+            };
+            for rect in stripes {
+                out.push(Item::Fill(Fill {
+                    rect,
+                    color: fill.color,
+                }));
+            }
+        }
+        _ => out.push(Item::Fill(fill)),
     }
 }
 

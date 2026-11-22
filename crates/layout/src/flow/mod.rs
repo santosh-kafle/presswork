@@ -23,6 +23,7 @@
 //! - [`fonts`]: mapping CSS font families to fonts
 //! - [`webfonts`]: `@font-face` fonts
 
+mod border;
 mod boxes;
 mod fonts;
 pub(crate) mod generated;
@@ -39,12 +40,11 @@ use std::sync::Arc;
 use parley::{FontContext, LayoutContext};
 use presswork_dom::resource::{Fetcher, LoadError};
 use presswork_dom::{Document, ElementData, NodeId, NodeKind};
-use presswork_style::{
-    Break, BreakInside, Color, ComputedStyle, Dimension, Display, Pseudo, Side, Stylist,
-};
+use presswork_style::{Break, BreakInside, ComputedStyle, Dimension, Display, Pseudo, Stylist};
 
-use crate::fragment::{Fill, ImageData, Item, LinkTarget, Mark, MarkKind};
+use crate::fragment::{ImageData, Item, LinkTarget, Mark, MarkKind};
 use crate::geometry::{Point, Rect};
+pub(crate) use border::BoxPaint;
 use boxes::BoxGeometry;
 pub(crate) use fonts::GenericFonts;
 use generated::PseudoBox;
@@ -91,90 +91,6 @@ pub(crate) struct RepeatedHeader {
     pub height: f32,
     /// Positioned relative to the canvas's left edge and the header's top.
     pub items: Vec<Item>,
-}
-
-/// The background and borders of a box.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) struct BoxPaint {
-    pub background: Color,
-    /// Width and color of each border; a width of zero means no border.
-    pub border: [(Side, f32, Color); 4],
-}
-
-impl BoxPaint {
-    /// Paints nothing.
-    pub const INVISIBLE: Self = Self {
-        background: Color::TRANSPARENT,
-        border: [
-            (Side::Top, 0.0, Color::TRANSPARENT),
-            (Side::Right, 0.0, Color::TRANSPARENT),
-            (Side::Bottom, 0.0, Color::TRANSPARENT),
-            (Side::Left, 0.0, Color::TRANSPARENT),
-        ],
-    };
-
-    /// The paint for a box with this style, or `None` if nothing is
-    /// visible.
-    pub fn from_style(style: &ComputedStyle) -> Option<Self> {
-        let widths = style.border_widths();
-        let border = Side::ALL.map(|side| (side, widths.get(side), style.border_color(side)));
-        let visible = !style.background_color.is_transparent()
-            || border
-                .iter()
-                .any(|(_, width, color)| *width > 0.0 && !color.is_transparent());
-        visible.then_some(Self {
-            background: style.background_color,
-            border,
-        })
-    }
-
-    /// Removes the border on `side`.
-    pub fn without_border(mut self, side: Side) -> Self {
-        for edge in &mut self.border {
-            if edge.0 == side {
-                edge.1 = 0.0;
-            }
-        }
-        self
-    }
-
-    /// Appends the fills for a box whose border box is `rect`.
-    pub fn fills(&self, rect: Rect, out: &mut Vec<Item>) {
-        let Rect { origin, size } = rect;
-        let mut fill = |x: f32, y: f32, width: f32, height: f32, color: Color| {
-            if width > 0.0 && height > 0.0 && !color.is_transparent() {
-                out.push(Item::Fill(Fill {
-                    rect: Rect::new(x, y, width, height),
-                    color,
-                }));
-            }
-        };
-        fill(origin.x, origin.y, size.width, size.height, self.background);
-        for (side, width, color) in self.border {
-            let width = match side {
-                Side::Top | Side::Bottom => width.min(size.height),
-                Side::Left | Side::Right => width.min(size.width),
-            };
-            match side {
-                Side::Top => fill(origin.x, origin.y, size.width, width, color),
-                Side::Bottom => fill(
-                    origin.x,
-                    origin.y + size.height - width,
-                    size.width,
-                    width,
-                    color,
-                ),
-                Side::Left => fill(origin.x, origin.y, width, size.height, color),
-                Side::Right => fill(
-                    origin.x + size.width - width,
-                    origin.y,
-                    width,
-                    size.height,
-                    color,
-                ),
-            }
-        }
-    }
 }
 
 /// A box's background and borders, spanning a vertical range of the

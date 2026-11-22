@@ -1910,3 +1910,150 @@ fn block_links_make_their_lines_clickable() {
     assert_eq!(links.len(), 1, "{links:?}");
     assert!(approx(links[0].rect.size.width, 200.0));
 }
+
+fn shapes(page: &Page) -> Vec<&Shape> {
+    page.items
+        .iter()
+        .filter_map(|item| match item {
+            Item::Shape(shape) => Some(shape),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn dashed_and_dotted_borders_are_stroked_along_their_edges() {
+    let pages = layout(
+        "<body style='margin:0'><div style='width:100pt; height:20pt; border:2pt dashed red;
+         border-left-style: dotted'></div>",
+    );
+    let page = &pages[0];
+    assert!(fills(page).is_empty(), "no solid edges");
+    let strokes: Vec<_> = shapes(page)
+        .iter()
+        .map(|shape| match shape.paint {
+            ShapePaint::Stroke {
+                width, dash, round, ..
+            } => (width, dash.expect("dashed"), round),
+            other => panic!("{other:?}"),
+        })
+        .collect();
+    assert_eq!(strokes.len(), 4);
+    // The top edge, 104pt long: dashes of about 6pt (three widths).
+    let (width, (dash, gap), round) = strokes[0];
+    assert_eq!(width, 2.0);
+    assert!(
+        !round && (dash - 6.0).abs() < 0.5 && dash == gap,
+        "{dash} {gap}"
+    );
+    // The left edge: dots, round caps on zero-length dashes.
+    let (_, (dot, spacing), round) = strokes[3];
+    assert!(
+        round && dot == 0.0 && (spacing - 4.0).abs() < 0.5,
+        "{spacing}"
+    );
+}
+
+#[test]
+fn double_borders_are_two_lines() {
+    let pages = layout(
+        "<body style='margin:0'><div style='width:100pt; height:20pt; border-top:6pt double red'></div>",
+    );
+    let lines = fills_of(&pages[0], RED);
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    assert!(lines.iter().all(|r| approx(r.size.height, 2.0)));
+    assert!(approx(lines[1].origin.y - lines[0].origin.y, 4.0));
+}
+
+#[test]
+fn rounded_boxes_are_shapes() {
+    let pages = layout(
+        "<body style='margin:0'><div style='width:100pt; height:20pt; background:red;
+         border:2pt solid blue; border-radius:8pt'></div>",
+    );
+    let page = &pages[0];
+    assert!(fills(page).is_empty());
+    let shapes = shapes(page);
+    assert_eq!(shapes.len(), 2);
+    assert_eq!(
+        shapes[0].paint,
+        ShapePaint::Fill {
+            color: RED,
+            even_odd: false
+        }
+    );
+    assert_eq!(
+        shapes[1].paint,
+        ShapePaint::Fill {
+            color: BLUE,
+            even_odd: true
+        },
+        "the border is a ring"
+    );
+    let curves = shapes[0]
+        .path
+        .iter()
+        .filter(|op| matches!(op, PathOp::Cubic(..)))
+        .count();
+    assert_eq!(curves, 4);
+}
+
+#[test]
+fn rounded_corners_are_square_where_a_box_breaks_across_pages() {
+    let options = LayoutOptions {
+        page_size: Size::new(200.0, 200.0),
+        margins: EdgeSizes::uniform(10.0),
+        ..LayoutOptions::default()
+    };
+    let lines = "<p>line</p>".repeat(12);
+    let html = format!(
+        "<body style='margin:0'><div style='background:red; border-radius:10pt'>{lines}</div>"
+    );
+    let pages = layout_with(&html, &options);
+    assert_eq!(pages.len(), 2);
+    for page in &pages {
+        let shape = shapes(page)[0];
+        // Two rounded corners on each page, the others square: a
+        // degenerate curve has its control point on its end point.
+        let rounded = shape
+            .path
+            .windows(2)
+            .filter(|ops| match ops {
+                [PathOp::Line(a), PathOp::Cubic(_, _, c)]
+                | [PathOp::Move(a), PathOp::Cubic(_, _, c)] => a != c,
+                _ => false,
+            })
+            .count();
+        assert_eq!(rounded, 2, "{:?}", shape.path);
+    }
+}
+
+#[test]
+fn collapsed_table_borders_keep_their_style() {
+    let pages = layout(
+        "<body style='margin:0'><table style='border-collapse:collapse'>
+         <tr><td style='border-bottom:1pt dashed red'>a</td></tr>
+         <tr><td style='border-top:6pt double blue'>b</td></tr></table>",
+    );
+    let page = &pages[0];
+    // The line between the rows is drawn by both.
+    let blue: Vec<Rect> = distinct_fills(page)
+        .into_iter()
+        .filter(|rect| fills_of(page, BLUE).contains(rect))
+        .collect();
+    assert_eq!(blue.len(), 2, "double: {blue:?}");
+    // The dashed line lost to the wider double one on their shared edge.
+    assert!(shapes(page).is_empty());
+
+    let pages = layout(
+        "<body style='margin:0'><table style='border-collapse:collapse'>
+         <tr><td style='border-bottom:1pt dashed red'>a</td></tr><tr><td>b</td></tr></table>",
+    );
+    let shapes = shapes(&pages[0]);
+    // Drawn by both rows, identically.
+    assert!(!shapes.is_empty() && shapes.iter().all(|s| *s == shapes[0]));
+    assert!(matches!(
+        shapes[0].paint,
+        ShapePaint::Stroke { dash: Some(_), .. }
+    ));
+}

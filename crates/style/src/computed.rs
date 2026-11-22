@@ -147,6 +147,10 @@ pub struct ComputedStyle {
     pub letter_spacing: f32,
     /// Extra space after each word, in points.
     pub word_spacing: f32,
+    /// Horizontal and vertical radius of each corner, indexed like
+    /// [`Corner::ALL`]. Percentages are of the border box's width and
+    /// height.
+    pub border_radius: [(Dimension, Dimension); 4],
     /// `content`, for `::before` and `::after`.
     pub content: Content,
     pub counter_reset: CounterChanges,
@@ -205,6 +209,7 @@ impl ComputedStyle {
             text_transform: TextTransform::None,
             letter_spacing: 0.0,
             word_spacing: 0.0,
+            border_radius: [(Dimension::ZERO, Dimension::ZERO); 4],
             content: Content::Normal,
             counter_reset: Arc::from([]),
             counter_increment: Arc::from([]),
@@ -234,6 +239,9 @@ impl ComputedStyle {
         match id {
             L::Display => self.display = other.display,
             L::Content => self.content = other.content.clone(),
+            L::BorderRadius(corner) => {
+                self.border_radius[corner as usize] = other.border_radius[corner as usize];
+            }
             L::CounterReset => self.counter_reset = Arc::clone(&other.counter_reset),
             L::CounterIncrement => self.counter_increment = Arc::clone(&other.counter_increment),
             L::CounterSet => self.counter_set = Arc::clone(&other.counter_set),
@@ -297,6 +305,10 @@ impl ComputedStyle {
         match declaration {
             D::Display(v) => self.display = *v,
             D::Content(v) => self.content = v.clone(),
+            D::BorderRadius(corner, h, v) => {
+                self.border_radius[*corner as usize] =
+                    (h.compute(font_size, root), v.compute(font_size, root));
+            }
             D::CounterReset(v) => self.counter_reset = Arc::clone(v),
             D::CounterIncrement(v) => self.counter_increment = Arc::clone(v),
             D::CounterSet(v) => self.counter_set = Arc::clone(v),

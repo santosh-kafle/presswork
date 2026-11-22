@@ -36,7 +36,7 @@ use presswork_style::Stylist;
 
 pub use fragment::{
     Color, Fill, FontData, Glyph, Image, ImageData, ImageFormat, Item, Link, LinkTarget, Mark,
-    MarkKind, Page, TextRun,
+    MarkKind, Page, PathOp, Shape, ShapePaint, TextRun,
 };
 pub use geometry::{EdgeSizes, Point, Rect, Size};
 pub use margin::{Band, BandStyle, BandText, MarginDocument};

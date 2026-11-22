@@ -412,6 +412,7 @@ mod tests {
         let paint = BoxPaint {
             background: RED,
             border: Side::ALL.map(|side| (side, 0.0, Color::BLACK)),
+            ..BoxPaint::INVISIBLE
         };
         let mut content = canvas(vec![slice(10.0, 60.0), slice(70.0, 60.0)]);
         content.decorations.push(Decoration {
