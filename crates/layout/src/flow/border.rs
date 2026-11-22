@@ -1,15 +1,18 @@
 //! Painting a box's background and borders: square or rounded corners,
 //! and solid, double, dashed or dotted edges.
 
-use presswork_style::{BorderStyle, Color, ComputedStyle, Corner, Dimension, Side};
+use std::sync::Arc;
 
-use crate::fragment::{Fill, Item, PathOp, Shape, ShapePaint};
+use presswork_style::{BackgroundSize, BorderStyle, Color, ComputedStyle, Corner, Dimension, Side};
+
+use crate::fragment::{Fill, ImageData, ImageFill, Item, PathOp, Shape, ShapePaint};
 use crate::geometry::{Point, Rect, Size};
 
 /// The background and borders of a box.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct BoxPaint {
     pub background: Color,
+    pub image: Option<BackgroundImage>,
     /// Width and color of each border; a width of zero means no border.
     pub border: [(Side, f32, Color); 4],
     /// The style of each border, in the order of `border`.
@@ -17,6 +20,65 @@ pub(crate) struct BoxPaint {
     /// Horizontal and vertical radius of each corner, indexed like
     /// [`Corner::ALL`]; percentages are of the box's width and height.
     pub radii: [(Dimension, Dimension); 4],
+}
+
+/// A loaded background image and how it is laid out.
+#[derive(Debug, Clone)]
+pub(crate) struct BackgroundImage {
+    pub data: Arc<ImageData>,
+    pub repeat: (bool, bool),
+    pub position: ((Dimension, bool), (Dimension, bool)),
+    pub size: BackgroundSize,
+}
+
+impl PartialEq for BackgroundImage {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.data, &other.data)
+            && self.repeat == other.repeat
+            && self.position == other.position
+            && self.size == other.size
+    }
+}
+
+impl BackgroundImage {
+    /// The image of `style`, given its loaded data.
+    pub fn new(style: &ComputedStyle, data: Arc<ImageData>) -> Self {
+        Self {
+            data,
+            repeat: style.background_repeat,
+            position: style.background_position,
+            size: style.background_size,
+        }
+    }
+
+    /// The size of one copy in a positioning area `area` large (CSS
+    /// Backgrounds 3, section 3.9).
+    fn tile_size(&self, area: Size) -> Size {
+        let natural = self.data.natural_size();
+        if natural.width <= 0.0 || natural.height <= 0.0 {
+            return Size::default();
+        }
+        let ratio = natural.width / natural.height;
+        let scaled = |scale: f32| Size::new(natural.width * scale, natural.height * scale);
+        match self.size {
+            BackgroundSize::Cover => {
+                scaled((area.width / natural.width).max(area.height / natural.height))
+            }
+            BackgroundSize::Contain => {
+                scaled((area.width / natural.width).min(area.height / natural.height))
+            }
+            BackgroundSize::Explicit(width, height) => {
+                let width = width.and_then(|w| w.resolve(area.width));
+                let height = height.and_then(|h| h.resolve(area.height));
+                match (width, height) {
+                    (Some(w), Some(h)) => Size::new(w, h),
+                    (Some(w), None) => Size::new(w, w / ratio),
+                    (None, Some(h)) => Size::new(h * ratio, h),
+                    (None, None) => natural,
+                }
+            }
+        }
+    }
 }
 
 /// Bézier control point distance for a quarter ellipse, as a fraction of
@@ -31,6 +93,7 @@ impl BoxPaint {
     /// Paints nothing.
     pub const INVISIBLE: Self = Self {
         background: Color::TRANSPARENT,
+        image: None,
         border: [
             (Side::Top, 0.0, Color::TRANSPARENT),
             (Side::Right, 0.0, Color::TRANSPARENT),
@@ -41,17 +104,19 @@ impl BoxPaint {
         radii: [(Dimension::ZERO, Dimension::ZERO); 4],
     };
 
-    /// The paint for a box with this style, or `None` if nothing is
-    /// visible.
-    pub fn from_style(style: &ComputedStyle) -> Option<Self> {
+    /// The paint for a box with this style and background image (loaded
+    /// by the caller), or `None` if nothing is visible.
+    pub fn from_style(style: &ComputedStyle, image: Option<BackgroundImage>) -> Option<Self> {
         let widths = style.border_widths();
         let border = Side::ALL.map(|side| (side, widths.get(side), style.border_color(side)));
         let visible = !style.background_color.is_transparent()
+            || image.is_some()
             || border
                 .iter()
                 .any(|(_, width, color)| *width > 0.0 && !color.is_transparent());
         visible.then_some(Self {
             background: style.background_color,
+            image,
             border,
             styles: Side::ALL.map(|side| style.border.get(side).style),
             radii: style.border_radius,
@@ -80,12 +145,116 @@ impl BoxPaint {
 
     /// Appends the items for a box whose border box is `rect`.
     pub fn fills(&self, rect: Rect, out: &mut Vec<Item>) {
-        let radii = resolve_radii(&self.radii, rect.size);
-        if radii.iter().all(|&(h, v)| h <= 0.0 || v <= 0.0) {
-            self.square(rect, out);
+        self.fills_piece(rect, rect, out);
+    }
+
+    /// Appends the items for the part `piece` of a box whose whole border
+    /// box is `whole`: a box split across pages. A background image is
+    /// placed in the whole box, so that the pieces line up.
+    pub fn fills_piece(&self, piece: Rect, whole: Rect, out: &mut Vec<Item>) {
+        let radii = resolve_radii(&self.radii, piece.size);
+        let square = radii.iter().all(|&(h, v)| h <= 0.0 || v <= 0.0);
+        let outline = if square {
+            rect_path(piece)
         } else {
-            self.rounded(rect, radii, out);
+            rounded_rect(piece, radii)
+        };
+        if !self.background.is_transparent() {
+            if square {
+                let Rect { origin, size } = piece;
+                fill(
+                    out,
+                    origin.x,
+                    origin.y,
+                    size.width,
+                    size.height,
+                    self.background,
+                );
+            } else {
+                out.push(Item::Shape(Shape {
+                    path: outline.clone(),
+                    paint: ShapePaint::Fill {
+                        color: self.background,
+                        even_odd: false,
+                    },
+                    clip: None,
+                }));
+            }
         }
+        if let Some(image) = &self.image {
+            self.image_fill(image, piece, whole, outline, out);
+        }
+        if square {
+            self.square(piece, out);
+        } else {
+            self.rounded(piece, radii, out);
+        }
+    }
+
+    /// Appends the background image: sized and positioned in the padding
+    /// box of `whole`, painted within `outline` around `piece`.
+    fn image_fill(
+        &self,
+        image: &BackgroundImage,
+        piece: Rect,
+        whole: Rect,
+        outline: Vec<PathOp>,
+        out: &mut Vec<Item>,
+    ) {
+        let widths = Side::ALL.map(|side| self.edge(side).0);
+        let area = inset(whole, widths);
+        let size = image.tile_size(area.size);
+        if size.width <= 0.0 || size.height <= 0.0 {
+            return;
+        }
+        // From the start of the area or, `from_end`, its far edge.
+        let offset = |(value, from_end): (Dimension, bool), free: f32| {
+            let offset = match value {
+                Dimension::Percent(fraction) => fraction * free,
+                other => other.resolve(free).unwrap_or(0.0),
+            };
+            if from_end { free - offset } else { offset }
+        };
+        let tile = Rect::new(
+            area.origin.x + offset(image.position.0, area.size.width - size.width),
+            area.origin.y + offset(image.position.1, area.size.height - size.height),
+            size.width,
+            size.height,
+        );
+        // Along an axis that does not repeat, only the one copy's band is
+        // painted.
+        let (mut x0, mut x1) = (piece.origin.x, piece.origin.x + piece.size.width);
+        let (mut y0, mut y1) = (piece.origin.y, piece.origin.y + piece.size.height);
+        if !image.repeat.0 {
+            x0 = x0.max(tile.origin.x);
+            x1 = x1.min(tile.origin.x + size.width);
+        }
+        if !image.repeat.1 {
+            y0 = y0.max(tile.origin.y);
+            y1 = y1.min(tile.origin.y + size.height);
+        }
+        if x1 <= x0 || y1 <= y0 {
+            return;
+        }
+        let step = Size::new(
+            if image.repeat.0 {
+                size.width
+            } else {
+                size.width + piece.size.width
+            },
+            if image.repeat.1 {
+                size.height
+            } else {
+                size.height + piece.size.height
+            },
+        );
+        out.push(Item::ImageFill(ImageFill {
+            clip: outline,
+            rect: Rect::new(x0, y0, x1 - x0, y1 - y0),
+            tile,
+            step,
+            data: Arc::clone(&image.data),
+        }));
     }
 
     /// The width and color of the border on `side`, and its style.
@@ -99,14 +268,6 @@ impl BoxPaint {
     /// dashed and dotted edges.
     fn square(&self, rect: Rect, out: &mut Vec<Item>) {
         let Rect { origin, size } = rect;
-        fill(
-            out,
-            origin.x,
-            origin.y,
-            size.width,
-            size.height,
-            self.background,
-        );
         let left = self.edge(Side::Left).0.min(size.width);
         let right = self.edge(Side::Right).0.min(size.width);
         for (side, width, color) in self.border {
@@ -186,17 +347,6 @@ impl BoxPaint {
     /// A box with rounded corners: the background is a rounded shape, the
     /// border the ring between it and the padding box.
     fn rounded(&self, rect: Rect, radii: [(f32, f32); 4], out: &mut Vec<Item>) {
-        let outer = rounded_rect(rect, radii);
-        if !self.background.is_transparent() {
-            out.push(Item::Shape(Shape {
-                path: outer.clone(),
-                paint: ShapePaint::Fill {
-                    color: self.background,
-                    even_odd: false,
-                },
-                clip: None,
-            }));
-        }
         let edges = Side::ALL.map(|side| self.edge(side));
         let visible = |&(width, color, style): &(f32, Color, BorderStyle)| {
             width > 0.0 && !color.is_transparent() && style.is_visible()
@@ -355,6 +505,19 @@ fn resolve_radii(radii: &[(Dimension, Dimension); 4], size: Size) -> [(f32, f32)
         .min(ratio(size.height, tr.1 + br.1))
         .min(1.0);
     resolved.map(|(h, v)| (h * factor, v * factor))
+}
+
+/// The outline of `rect`.
+fn rect_path(rect: Rect) -> Vec<PathOp> {
+    let (x0, y0) = (rect.origin.x, rect.origin.y);
+    let (x1, y1) = (x0 + rect.size.width, y0 + rect.size.height);
+    vec![
+        PathOp::Move(Point::new(x0, y0)),
+        PathOp::Line(Point::new(x1, y0)),
+        PathOp::Line(Point::new(x1, y1)),
+        PathOp::Line(Point::new(x0, y1)),
+        PathOp::Close,
+    ]
 }
 
 /// `rect` shrunk by `widths` (top, right, bottom, left).

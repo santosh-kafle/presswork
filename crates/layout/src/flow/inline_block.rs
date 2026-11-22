@@ -5,7 +5,7 @@ use presswork_style::{ComputedStyle, Dimension};
 
 use super::boxes::BoxGeometry;
 use super::inline::{Inline, InlineObject};
-use super::{BoxPaint, Flow, Source};
+use super::{Flow, Source};
 use crate::geometry::Rect;
 
 impl Flow<'_, '_> {
@@ -93,7 +93,7 @@ impl Flow<'_, '_> {
             border.top + padding.top + content_height + padding.bottom + border.bottom,
         );
         let mut items = Vec::new();
-        if let Some(paint) = BoxPaint::from_style(style) {
+        if let Some(paint) = self.box_paint(style) {
             paint.fills(border_box, &mut items);
         }
         canvas.into_items(geometry.content_x(), content_top, &mut items);

@@ -102,6 +102,12 @@ pub(crate) fn presentational_hints(
     {
         hints.push(D::BackgroundColor(ColorValue::Color(color)));
     }
+    if matches!(name, "body" | "table" | "tr" | "td" | "th")
+        && let Some(url) = element.attr("background").map(str::trim)
+        && !url.is_empty()
+    {
+        hints.push(D::BackgroundImage(Some(url.into())));
+    }
 
     if name == "table" {
         if let Some(width) = element.attr("border").map(parse_border_attribute)
@@ -266,6 +272,15 @@ mod tests {
             ]
         );
         assert_eq!(hints("<span align=right>", "span"), []);
+    }
+
+    #[test]
+    fn background_attribute() {
+        assert_eq!(
+            hints("<table><tr><td background='paper.png'>", "td"),
+            [D::BackgroundImage(Some("paper.png".into()))]
+        );
+        assert_eq!(hints("<p background='paper.png'>", "p"), []);
     }
 
     #[test]

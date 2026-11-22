@@ -35,8 +35,8 @@ pub use presswork_dom::resource::{DataUrls, Fetcher, LoadError, LoadFailure, Loa
 use presswork_style::Stylist;
 
 pub use fragment::{
-    Color, Fill, FontData, Glyph, Image, ImageData, ImageFormat, Item, Link, LinkTarget, Mark,
-    MarkKind, Page, PathOp, Shape, ShapePaint, TextRun,
+    Color, Fill, FontData, Glyph, Image, ImageData, ImageFill, ImageFormat, Item, Link, LinkTarget,
+    Mark, MarkKind, Page, PathOp, Shape, ShapePaint, TextRun,
 };
 pub use geometry::{EdgeSizes, Point, Rect, Size};
 pub use margin::{Band, BandStyle, BandText, MarginDocument};

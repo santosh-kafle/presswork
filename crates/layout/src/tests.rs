@@ -2094,3 +2094,120 @@ fn symbols_in_latin_text_find_a_symbol_font() {
     );
     assert!(has_glyph(&pages[0], '✔'));
 }
+
+#[track_caller]
+fn assert_rect(a: Rect, b: Rect) {
+    let close = approx(a.origin.x, b.origin.x)
+        && approx(a.origin.y, b.origin.y)
+        && approx(a.size.width, b.size.width)
+        && approx(a.size.height, b.size.height);
+    assert!(close, "{a:?} != {b:?}");
+}
+
+fn image_fills(page: &Page) -> Vec<&ImageFill> {
+    page.items
+        .iter()
+        .filter_map(|item| match item {
+            Item::ImageFill(fill) => Some(fill),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn background_images_tile_from_the_padding_box() {
+    let pages = layout(&format!(
+        "<body style='margin:0'><div style='width:100pt; height:50pt; border:2pt solid;
+         background:#eee url({PNG})'></div>"
+    ));
+    let page = &pages[0];
+    let fills = image_fills(page);
+    assert_eq!(fills.len(), 1);
+    let fill = fills[0];
+    // The PNG is 2×1 pixels: 1.5×0.75pt.
+    assert_rect(fill.tile, Rect::new(M + 2.0, M + 2.0, 1.5, 0.75));
+    assert_rect(fill.rect, Rect::new(M, M, 104.0, 54.0));
+    assert_eq!(fill.step, fill.tile.size);
+    // Painted after the color, before the borders.
+    let color = paint_index(
+        page,
+        |item| matches!(item, Item::Fill(f) if f.rect.size.width > 100.0),
+    );
+    let image = paint_index(page, |item| matches!(item, Item::ImageFill(_)));
+    let border = paint_index(
+        page,
+        |item| matches!(item, Item::Fill(f) if f.rect.size.height == 2.0),
+    );
+    assert!(color < image && image < border);
+}
+
+#[test]
+fn background_images_are_positioned_and_sized() {
+    let fill = |css: &str| {
+        let pages = layout(&format!(
+            "<body style='margin:0'><div style='width:100pt; height:100pt;
+             background:url({PNG}) {css}'></div>"
+        ));
+        let fill = image_fills(&pages[0])[0].clone();
+        let at = |r: Rect| Rect::new(r.origin.x - M, r.origin.y - M, r.size.width, r.size.height);
+        (at(fill.tile), at(fill.rect))
+    };
+    let (tile, rect) = fill("no-repeat right 10pt bottom 5pt / 20pt");
+    assert_rect(tile, Rect::new(70.0, 85.0, 20.0, 10.0));
+    assert_rect(rect, tile);
+    let (tile, rect) = fill("repeat-x 0 50% / 20pt");
+    assert_rect(tile, Rect::new(0.0, 45.0, 20.0, 10.0));
+    assert_rect(rect, Rect::new(0.0, 45.0, 100.0, 10.0));
+    assert_rect(
+        fill("center / cover").0,
+        Rect::new(-50.0, 0.0, 200.0, 100.0),
+    );
+    assert_rect(
+        fill("center / contain").0,
+        Rect::new(0.0, 25.0, 100.0, 50.0),
+    );
+}
+
+#[test]
+fn background_images_line_up_across_pages() {
+    let options = LayoutOptions {
+        page_size: Size::new(200.0, 200.0),
+        margins: EdgeSizes::uniform(10.0),
+        ..LayoutOptions::default()
+    };
+    let lines = "<p>line</p>".repeat(12);
+    let html = format!(
+        "<body style='margin:0'><div style='background:url({PNG}) no-repeat 0 0 / 30pt'>{lines}</div>"
+    );
+    let pages = layout_with(&html, &options);
+    assert_eq!(pages.len(), 2);
+    assert_eq!(
+        image_fills(&pages[0]).len(),
+        1,
+        "the one copy is on the first page"
+    );
+    assert!(image_fills(&pages[1]).is_empty());
+
+    // Repeated, the copies on the second page continue from the box's
+    // top on the first.
+    let html = format!(
+        "<body style='margin:0'><div style='background:url({PNG}) 0 0 / 30pt'>{lines}</div>"
+    );
+    let pages = layout_with(&html, &options);
+    let first = image_fills(&pages[0])[0];
+    let second = image_fills(&pages[1])[0];
+    assert!(approx(first.tile.origin.y, first.rect.origin.y));
+    assert!(
+        second.tile.origin.y < second.rect.origin.y - 1.0,
+        "{second:?}"
+    );
+}
+
+#[test]
+fn background_images_on_inline_elements_and_cells() {
+    let pages = layout(&format!(
+        "<body style='margin:0'><p><span style='background:url({PNG}) no-repeat; padding-left:12pt'>paid</span></p>
+         <table><tr><td background='{PNG}'>a</td></tr></table>"
+    ));
+    assert_eq!(image_fills(&pages[0]).len(), 2);
+}

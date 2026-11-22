@@ -3,12 +3,25 @@
 use std::sync::Arc;
 
 use crate::properties::{
-    BORDER_WIDTH_MEDIUM, BorderCollapse, BorderStyle, BoxSizing, Break, BreakInside, Content,
-    CounterChanges, CssWide, Display, FontFamilyName, FontSize, FontWeight, GenericFamily,
-    LineHeight, ListStyleType, LonghandId, PropertyDeclaration, TableLayout, TextAlign,
-    TextDecorationLine, TextTransform, VerticalAlign, WhiteSpace,
+    BORDER_WIDTH_MEDIUM, BackgroundSizeValue, BorderCollapse, BorderStyle, BoxSizing, Break,
+    BreakInside, Content, CounterChanges, CssWide, Display, FontFamilyName, FontSize, FontWeight,
+    GenericFamily, LineHeight, ListStyleType, LonghandId, PositionOffset, PropertyDeclaration,
+    TableLayout, TextAlign, TextDecorationLine, TextTransform, VerticalAlign, WhiteSpace,
 };
-use crate::values::{Color, ColorValue, Dimension, Length, Side, Sides};
+use crate::values::{Color, ColorValue, Dim, Dimension, Length, Side, Sides};
+
+/// A computed `background-size`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum BackgroundSize {
+    /// As large as fits the positioning area, keeping proportions.
+    Contain,
+    /// As small as covers the positioning area, keeping proportions.
+    Cover,
+    /// Width and height; percentages are of the positioning area.
+    /// `None` is `auto`: from the other one and the image's proportions,
+    /// or the image's own size.
+    Explicit(Option<Dimension>, Option<Dimension>),
+}
 
 /// The browser default font size: 16px.
 pub const DEFAULT_FONT_SIZE: f32 = 12.0;
@@ -147,6 +160,16 @@ pub struct ComputedStyle {
     pub letter_spacing: f32,
     /// Extra space after each word, in points.
     pub word_spacing: f32,
+    /// The background image's URL, if any.
+    pub background_image: Option<Arc<str>>,
+    /// Whether the background image repeats horizontally and vertically.
+    pub background_repeat: (bool, bool),
+    /// Offsets of the background image in its positioning area (the
+    /// padding box), from its start or, if the flag is set, its far edge;
+    /// percentages align that fraction of the image with the same
+    /// fraction of the area.
+    pub background_position: ((Dimension, bool), (Dimension, bool)),
+    pub background_size: BackgroundSize,
     /// Horizontal and vertical radius of each corner, indexed like
     /// [`Corner::ALL`]. Percentages are of the border box's width and
     /// height.
@@ -210,6 +233,13 @@ impl ComputedStyle {
             letter_spacing: 0.0,
             word_spacing: 0.0,
             border_radius: [(Dimension::ZERO, Dimension::ZERO); 4],
+            background_image: None,
+            background_repeat: (true, true),
+            background_position: (
+                (Dimension::Percent(0.0), false),
+                (Dimension::Percent(0.0), false),
+            ),
+            background_size: BackgroundSize::Explicit(None, None),
             content: Content::Normal,
             counter_reset: Arc::from([]),
             counter_increment: Arc::from([]),
@@ -239,6 +269,10 @@ impl ComputedStyle {
         match id {
             L::Display => self.display = other.display,
             L::Content => self.content = other.content.clone(),
+            L::BackgroundImage => self.background_image.clone_from(&other.background_image),
+            L::BackgroundRepeat => self.background_repeat = other.background_repeat,
+            L::BackgroundPosition => self.background_position = other.background_position,
+            L::BackgroundSize => self.background_size = other.background_size,
             L::BorderRadius(corner) => {
                 self.border_radius[corner as usize] = other.border_radius[corner as usize];
             }
@@ -305,6 +339,22 @@ impl ComputedStyle {
         match declaration {
             D::Display(v) => self.display = *v,
             D::Content(v) => self.content = v.clone(),
+            D::BackgroundImage(v) => self.background_image.clone_from(v),
+            D::BackgroundRepeat(x, y) => self.background_repeat = (*x, *y),
+            D::BackgroundPosition(x, y) => {
+                let compute = |p: &PositionOffset| (p.length.compute(font_size, root), p.from_end);
+                self.background_position = (compute(x), compute(y));
+            }
+            D::BackgroundSize(v) => {
+                let compute = |d: Option<Dim>| d.map(|d| d.compute(font_size, root));
+                self.background_size = match *v {
+                    BackgroundSizeValue::Cover => BackgroundSize::Cover,
+                    BackgroundSizeValue::Contain => BackgroundSize::Contain,
+                    BackgroundSizeValue::Explicit(w, h) => {
+                        BackgroundSize::Explicit(compute(w), compute(h))
+                    }
+                };
+            }
             D::BorderRadius(corner, h, v) => {
                 self.border_radius[*corner as usize] =
                     (h.compute(font_size, root), v.compute(font_size, root));

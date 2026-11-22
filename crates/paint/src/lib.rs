@@ -19,13 +19,13 @@ use krilla::metadata::Metadata;
 use krilla::num::NormalizedF32;
 use krilla::outline::{Outline, OutlineNode};
 use krilla::page::PageSettings;
-use krilla::paint::{Fill, FillRule, LineCap, LineJoin, Stroke, StrokeDash};
+use krilla::paint::{Fill, FillRule, LineCap, LineJoin, Pattern, Stroke, StrokeDash};
 use krilla::surface::Surface;
 use krilla::text::{Font, GlyphId, KrillaGlyph};
 use krilla::{Data, Document};
 use presswork_layout::{
-    Color, FontData, Image, ImageData, ImageFormat, Item, Link, LinkTarget, MarkKind, Page, PathOp,
-    Shape, ShapePaint, TextRun,
+    Color, FontData, Image, ImageData, ImageFill, ImageFormat, Item, Link, LinkTarget, MarkKind,
+    Page, PathOp, Shape, ShapePaint, TextRun,
 };
 
 /// Document-level options for the generated PDF.
@@ -233,6 +233,11 @@ fn write(
                     }
                 }
                 Item::Shape(shape) => draw_shape(&mut surface, shape),
+                Item::ImageFill(fill) => {
+                    if let Some(pdf_image) = images.get(&fill.data) {
+                        draw_image_fill(&mut surface, fill, pdf_image);
+                    }
+                }
                 Item::Link(link) => links.push(link),
                 Item::Mark(_) => {}
             }
@@ -270,6 +275,45 @@ fn draw_image(surface: &mut Surface<'_>, image: &Image, pdf_image: PdfImage) {
     };
     surface.push_transform(&Transform::from_translate(rect.origin.x, rect.origin.y));
     surface.draw_image(pdf_image, size);
+    surface.pop();
+}
+
+/// Tiles `fill.rect` with copies of an image, the first at `fill.tile`,
+/// within `fill.clip`: a tiling pattern whose cell draws the image once.
+fn draw_image_fill(surface: &mut Surface<'_>, fill: &ImageFill, pdf_image: PdfImage) {
+    let tile = fill.tile;
+    let (Some(size), Some(clip)) = (
+        Size::from_wh(tile.size.width, tile.size.height),
+        build_path(&fill.clip),
+    ) else {
+        return;
+    };
+    let r = fill.rect;
+    let Some(rect) = Rect::from_xywh(r.origin.x, r.origin.y, r.size.width, r.size.height) else {
+        return;
+    };
+    let mut cell = surface.stream_builder();
+    let mut cell_surface = cell.surface();
+    cell_surface.draw_image(pdf_image, size);
+    cell_surface.finish();
+    let pattern = Pattern {
+        stream: cell.finish(),
+        transform: Transform::from_translate(tile.origin.x, tile.origin.y),
+        width: fill.step.width,
+        height: fill.step.height,
+    };
+    let mut area = PathBuilder::new();
+    area.push_rect(rect);
+    let Some(area) = area.finish() else {
+        return;
+    };
+    surface.push_clip_path(&clip, &FillRule::NonZero);
+    surface.set_fill(Some(Fill {
+        paint: pattern.into(),
+        opacity: NormalizedF32::ONE,
+        rule: FillRule::NonZero,
+    }));
+    surface.draw_path(&area);
     surface.pop();
 }
 
@@ -554,6 +598,18 @@ mod tests {
         );
         let pdf = render_pdf(&pages, &PdfOptions::default()).unwrap();
         assert!(pdf.bytes.starts_with(b"%PDF-"));
+    }
+
+    #[test]
+    fn draws_background_images() {
+        let pages = pages(&format!(
+            "<div style='height:40px; background:url({PNG}) no-repeat center / contain;
+             border-radius:6px'>a</div><p style='background:url({PNG})'>b</p>"
+        ));
+        let pdf = render_pdf(&pages, &PdfOptions::default()).unwrap();
+        assert_eq!(pdf.broken_images, Vec::<String>::new());
+        assert!(contains(&pdf.bytes, b"/Subtype/Image"), "image is embedded");
+        assert!(contains(&pdf.bytes, b"/PatternType"), "drawn as a pattern");
     }
 
     #[test]

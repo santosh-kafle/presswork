@@ -83,7 +83,7 @@ pub(crate) fn paginate(canvas: Canvas, size: Size, margins: EdgeSizes) -> Vec<Pa
             if bottom <= top {
                 continue;
             }
-            let mut paint = decoration.paint;
+            let mut paint = decoration.paint.clone();
             if decoration.top < start {
                 paint = paint.without_border(Side::Top);
             }
@@ -97,7 +97,15 @@ pub(crate) fn paginate(canvas: Canvas, size: Size, margins: EdgeSizes) -> Vec<Pa
                 decoration.width,
                 (bottom - top) as f32,
             );
-            paint.fills(rect, &mut sheet.boxes);
+            // The whole box, for placing a background image: it may start
+            // on an earlier page and end on a later one.
+            let whole = Rect::new(
+                rect.origin.x,
+                rect.origin.y - (top - decoration.top) as f32,
+                decoration.width,
+                (decoration.bottom - decoration.top) as f32,
+            );
+            paint.fills_piece(rect, whole, &mut sheet.boxes);
         }
     }
 

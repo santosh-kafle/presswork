@@ -303,6 +303,23 @@ pub enum LineHeight {
     Percent(f32),
 }
 
+/// One axis of a `background-position`: an offset from the start (left
+/// or top) or, with `from_end`, the far edge.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PositionOffset {
+    pub length: Dim,
+    pub from_end: bool,
+}
+
+/// A specified `background-size`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum BackgroundSizeValue {
+    Cover,
+    Contain,
+    /// Width and height; `None` is `auto`.
+    Explicit(Option<Dim>, Option<Dim>),
+}
+
 /// A corner of a box, for `border-radius`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Corner {
@@ -406,6 +423,10 @@ pub enum LonghandId {
     CounterIncrement,
     CounterSet,
     BorderRadius(Corner),
+    BackgroundImage,
+    BackgroundRepeat,
+    BackgroundPosition,
+    BackgroundSize,
 }
 
 impl LonghandId {
@@ -420,7 +441,8 @@ impl LonghandId {
             | BorderStyle(_) | BorderColor(_) | Width | Height | MaxWidth | MaxHeight
             | MinHeight | BoxSizing | VerticalAlign | BreakBefore | BreakAfter
             | TextDecorationLine | TextDecorationColor | BreakInside | TableLayout | Content
-            | CounterReset | CounterIncrement | CounterSet | BorderRadius(_) => false,
+            | CounterReset | CounterIncrement | CounterSet | BorderRadius(_) | BackgroundImage
+            | BackgroundRepeat | BackgroundPosition | BackgroundSize => false,
         }
     }
 
@@ -464,6 +486,10 @@ impl LonghandId {
             CounterReset,
             CounterIncrement,
             CounterSet,
+            BackgroundImage,
+            BackgroundRepeat,
+            BackgroundPosition,
+            BackgroundSize,
         ];
         let sided = Side::ALL.into_iter().flat_map(|side| {
             [
@@ -534,6 +560,14 @@ pub enum PropertyDeclaration {
     CounterSet(CounterChanges),
     /// Horizontal and vertical radius.
     BorderRadius(Corner, Dim, Dim),
+    /// The image's URL, as written (or resolved against its stylesheet);
+    /// `None` for `none`.
+    BackgroundImage(Option<Arc<str>>),
+    /// Whether the image repeats horizontally and vertically.
+    BackgroundRepeat(bool, bool),
+    /// Horizontal and vertical offset; keywords are percentages.
+    BackgroundPosition(PositionOffset, PositionOffset),
+    BackgroundSize(BackgroundSizeValue),
     /// `inherit`, `initial` or `unset` for the given property.
     CssWide(LonghandId, CssWide),
 }
@@ -585,6 +619,10 @@ impl PropertyDeclaration {
             D::CounterIncrement(_) => LonghandId::CounterIncrement,
             D::CounterSet(_) => LonghandId::CounterSet,
             D::BorderRadius(corner, ..) => LonghandId::BorderRadius(*corner),
+            D::BackgroundImage(_) => LonghandId::BackgroundImage,
+            D::BackgroundRepeat(..) => LonghandId::BackgroundRepeat,
+            D::BackgroundPosition(..) => LonghandId::BackgroundPosition,
+            D::BackgroundSize(_) => LonghandId::BackgroundSize,
             D::CssWide(id, _) => *id,
         }
     }
@@ -623,7 +661,18 @@ pub fn longhands_of(name: &str) -> Option<Vec<LonghandId>> {
     match name {
         "display" => one(L::Display),
         "color" => one(L::Color),
-        "background-color" | "background" => one(L::BackgroundColor),
+        "background-color" => one(L::BackgroundColor),
+        "background" => Some(vec![
+            L::BackgroundColor,
+            L::BackgroundImage,
+            L::BackgroundRepeat,
+            L::BackgroundPosition,
+            L::BackgroundSize,
+        ]),
+        "background-image" => one(L::BackgroundImage),
+        "background-repeat" => one(L::BackgroundRepeat),
+        "background-position" => one(L::BackgroundPosition),
+        "background-size" => one(L::BackgroundSize),
         "font-family" => one(L::FontFamily),
         "font-size" => one(L::FontSize),
         "font-weight" => one(L::FontWeight),
@@ -740,7 +789,7 @@ pub fn parse_declaration(
         "border-bottom" => parse_border(input, &[Side::Bottom], out)?,
         "border-left" => parse_border(input, &[Side::Left], out)?,
         "font" => parse_font(input, out)?,
-        "background" => out.push(D::BackgroundColor(parse_background(input))),
+        "background" => parse_background(input, out),
         "list-style" => out.push(D::ListStyleType(parse_list_style(input))),
         "text-decoration" => parse_text_decoration(input, out)?,
         "border-radius" => parse_border_radius(input, out)?,
@@ -801,6 +850,16 @@ fn parse_longhand(id: LonghandId, input: &mut Parser<'_>) -> Parsed<PropertyDecl
         L::CounterReset => D::CounterReset(parse_counter_changes(input, 0)?),
         L::CounterIncrement => D::CounterIncrement(parse_counter_changes(input, 1)?),
         L::CounterSet => D::CounterSet(parse_counter_changes(input, 0)?),
+        L::BackgroundImage => D::BackgroundImage(parse_background_image(input)?),
+        L::BackgroundRepeat => {
+            let (x, y) = parse_background_repeat(input)?;
+            D::BackgroundRepeat(x, y)
+        }
+        L::BackgroundPosition => {
+            let (x, y) = parse_background_position(input)?;
+            D::BackgroundPosition(x, y)
+        }
+        L::BackgroundSize => D::BackgroundSize(parse_background_size(input)?),
         L::BorderRadius(corner) => {
             let horizontal = Dim::parse(input, false, false)?;
             let vertical = input
@@ -1050,18 +1109,217 @@ fn parse_font(input: &mut Parser<'_>, out: &mut Vec<PropertyDeclaration>) -> Par
     Ok(())
 }
 
-/// `background`: only the color is used. Images, positions and the rest
-/// are skipped, and a background without a color resets it to transparent.
-fn parse_background(input: &mut Parser<'_>) -> ColorValue {
+/// `background`: color, image, repeat, position and size, in any order.
+/// Parts that are not supported (gradients, `fixed`, the box keywords)
+/// are skipped rather than invalidating the color. Unset parts get their
+/// initial values, as the shorthand resets them.
+fn parse_background(input: &mut Parser<'_>, out: &mut Vec<PropertyDeclaration>) {
+    use PropertyDeclaration as D;
     let mut color = ColorValue::Color(crate::values::Color::TRANSPARENT);
+    let mut image = None;
+    let mut repeat = (true, true);
+    let origin = PositionOffset {
+        length: Dim::Percent(0.0),
+        from_end: false,
+    };
+    let mut position = (origin, origin);
+    let mut size = BackgroundSizeValue::Explicit(None, None);
     while !input.is_exhausted() {
         if let Ok(found) = input.try_parse(ColorValue::parse) {
             color = found;
+        } else if let Ok(found) = input.try_parse(parse_background_image) {
+            image = found;
+        } else if let Ok(found) = input.try_parse(parse_background_repeat) {
+            repeat = found;
+        } else if let Ok(found) = input.try_parse(parse_background_position) {
+            position = found;
+            if input.try_parse(|i| i.expect_delim('/')).is_ok()
+                && let Ok(found) = input.try_parse(parse_background_size)
+            {
+                size = found;
+            }
         } else if input.next().is_err() {
             break;
         }
     }
-    color
+    out.extend([
+        D::BackgroundColor(color),
+        D::BackgroundImage(image),
+        D::BackgroundRepeat(repeat.0, repeat.1),
+        D::BackgroundPosition(position.0, position.1),
+        D::BackgroundSize(size),
+    ]);
+}
+
+/// `background-image`: `none` or a `url()`.
+fn parse_background_image(input: &mut Parser<'_>) -> Parsed<Option<Arc<str>>> {
+    if input.try_parse(|i| i.expect_ident_matching("none")).is_ok() {
+        return Ok(None);
+    }
+    let url = input.expect_url().map_err(Invalid::from)?;
+    Ok(Some(url.as_ref().into()))
+}
+
+/// `background-repeat`: one keyword, or one for each axis.
+fn parse_background_repeat(input: &mut Parser<'_>) -> Parsed<(bool, bool)> {
+    // `space` and `round` repeat as `repeat` does, without the spacing.
+    let keyword = |input: &mut Parser<'_>| -> Parsed<Option<bool>> {
+        let ident = input.expect_ident().map_err(Invalid::from)?;
+        match ident.to_ascii_lowercase().as_str() {
+            "repeat" | "space" | "round" => Ok(Some(true)),
+            "no-repeat" => Ok(Some(false)),
+            "repeat-x" | "repeat-y" => Ok(None),
+            _ => Err(Invalid),
+        }
+    };
+    let state = input.state();
+    let ident = input.expect_ident_cloned().map_err(Invalid::from)?;
+    match ident.to_ascii_lowercase().as_str() {
+        "repeat-x" => return Ok((true, false)),
+        "repeat-y" => return Ok((false, true)),
+        _ => input.reset(&state),
+    }
+    let x = keyword(input)?.ok_or(Invalid)?;
+    let y = match input.try_parse(|i| keyword(i)) {
+        Ok(Some(y)) => y,
+        Ok(None) => return Err(Invalid),
+        Err(_) => x,
+    };
+    Ok((x, y))
+}
+
+/// `background-position`: one or two values, each a keyword or a length
+/// or percentage, or three or four values, keywords each followed by an
+/// optional offset from that edge (`right 10px bottom 5px`). Keywords
+/// become percentages.
+fn parse_background_position(input: &mut Parser<'_>) -> Parsed<(PositionOffset, PositionOffset)> {
+    #[derive(Clone, Copy, PartialEq)]
+    enum Part {
+        Value(Dim),
+        /// An edge keyword: its axis (`Some(true)` for horizontal, `None`
+        /// for `center`) and whether it is the far edge.
+        Edge(Option<bool>, bool),
+    }
+    let part = |input: &mut Parser<'_>| -> Parsed<Part> {
+        if let Ok(dim) = input.try_parse(|i| Dim::parse(i, false, true)) {
+            return Ok(Part::Value(dim));
+        }
+        let ident = input.expect_ident().map_err(Invalid::from)?;
+        Ok(match ident.to_ascii_lowercase().as_str() {
+            "left" => Part::Edge(Some(true), false),
+            "right" => Part::Edge(Some(true), true),
+            "top" => Part::Edge(Some(false), false),
+            "bottom" => Part::Edge(Some(false), true),
+            "center" => Part::Edge(None, false),
+            _ => return Err(Invalid),
+        })
+    };
+    let mut parts = vec![part(input)?];
+    while parts.len() < 4 {
+        match input.try_parse(|i| part(i)) {
+            Ok(found) => parts.push(found),
+            Err(_) => break,
+        }
+    }
+    let start = |dim| PositionOffset {
+        length: dim,
+        from_end: false,
+    };
+    let center = start(Dim::Percent(0.5));
+    // A keyword alone, as a position on its axis.
+    let edge = |far: bool, axis: Option<bool>| match axis {
+        None => center,
+        Some(_) => start(Dim::Percent(if far { 1.0 } else { 0.0 })),
+    };
+    let horizontal = |p: Part| matches!(p, Part::Edge(Some(true), _));
+    let vertical = |p: Part| matches!(p, Part::Edge(Some(false), _));
+    let as_offset = |p: Part| match p {
+        Part::Value(dim) => start(dim),
+        Part::Edge(axis, far) => edge(far, axis),
+    };
+    match parts[..] {
+        [one] => Ok(if vertical(one) {
+            (center, as_offset(one))
+        } else {
+            (as_offset(one), center)
+        }),
+        [a, b] => {
+            if (horizontal(a) && horizontal(b)) || (vertical(a) && vertical(b)) {
+                return Err(Invalid);
+            }
+            if vertical(a) || horizontal(b) {
+                if matches!(a, Part::Value(_)) || matches!(b, Part::Value(_)) {
+                    // A length is only allowed after a horizontal keyword
+                    // or before a vertical one.
+                    return Err(Invalid);
+                }
+                Ok((as_offset(b), as_offset(a)))
+            } else {
+                Ok((as_offset(a), as_offset(b)))
+            }
+        }
+        _ => {
+            // Keywords, each with an optional offset from its edge.
+            let mut x = None;
+            let mut y = None;
+            let mut iter = parts.into_iter().peekable();
+            while let Some(part) = iter.next() {
+                let Part::Edge(axis, far) = part else {
+                    return Err(Invalid);
+                };
+                let offset = match iter.peek() {
+                    Some(&Part::Value(dim)) => {
+                        iter.next();
+                        if axis.is_none() {
+                            return Err(Invalid);
+                        }
+                        Some(PositionOffset {
+                            length: dim,
+                            from_end: far,
+                        })
+                    }
+                    _ => None,
+                };
+                let value = offset.unwrap_or_else(|| edge(far, axis));
+                let slot = match axis {
+                    Some(true) => &mut x,
+                    Some(false) => &mut y,
+                    None if x.is_none() => &mut x,
+                    None => &mut y,
+                };
+                if slot.replace(value).is_some() {
+                    return Err(Invalid);
+                }
+            }
+            Ok((x.unwrap_or(center), y.unwrap_or(center)))
+        }
+    }
+}
+
+/// `background-size`: `cover`, `contain`, or a width and height
+/// (lengths, percentages or `auto`).
+fn parse_background_size(input: &mut Parser<'_>) -> Parsed<BackgroundSizeValue> {
+    if input
+        .try_parse(|i| i.expect_ident_matching("cover"))
+        .is_ok()
+    {
+        return Ok(BackgroundSizeValue::Cover);
+    }
+    if input
+        .try_parse(|i| i.expect_ident_matching("contain"))
+        .is_ok()
+    {
+        return Ok(BackgroundSizeValue::Contain);
+    }
+    let size = |input: &mut Parser<'_>| -> Parsed<Option<Dim>> {
+        match Dim::parse(input, true, false)? {
+            Dim::Auto => Ok(None),
+            dim => Ok(Some(dim)),
+        }
+    };
+    let width = size(input)?;
+    let height = input.try_parse(|i| size(i)).unwrap_or(None);
+    Ok(BackgroundSizeValue::Explicit(width, height))
 }
 
 /// `text-decoration-line`: `none`, or any of `underline`, `overline`,
@@ -1562,17 +1820,113 @@ mod tests {
     }
 
     #[test]
-    fn background_shorthand_keeps_only_the_color() {
-        let color = |c| Ok(vec![D::BackgroundColor(ColorValue::Color(c))]);
+    fn background_shorthand_sets_every_part() {
+        let pct = |p| PositionOffset {
+            length: Dim::Percent(p),
+            from_end: false,
+        };
+        let all = |color: Color,
+                   image: Option<&str>,
+                   repeat: (bool, bool),
+                   position: (PositionOffset, PositionOffset),
+                   size: BackgroundSizeValue| {
+            Ok(vec![
+                D::BackgroundColor(ColorValue::Color(color)),
+                D::BackgroundImage(image.map(Arc::from)),
+                D::BackgroundRepeat(repeat.0, repeat.1),
+                D::BackgroundPosition(position.0, position.1),
+                D::BackgroundSize(size),
+            ])
+        };
+        let auto = BackgroundSizeValue::Explicit(None, None);
         assert_eq!(
             parse("background", "#eee"),
-            color(Color::rgb(238, 238, 238))
+            all(
+                Color::rgb(238, 238, 238),
+                None,
+                (true, true),
+                (pct(0.0), pct(0.0)),
+                auto
+            )
         );
         assert_eq!(
-            parse("background", "url(x.png) no-repeat red"),
-            color(Color::rgb(255, 0, 0))
+            parse("background", "url(x.png) no-repeat right top / contain red"),
+            all(
+                Color::rgb(255, 0, 0),
+                Some("x.png"),
+                (false, false),
+                (pct(1.0), pct(0.0)),
+                BackgroundSizeValue::Contain
+            )
         );
-        assert_eq!(parse("background", "none"), color(Color::TRANSPARENT));
+        // Unsupported parts do not lose the color.
+        assert_eq!(
+            parse("background", "linear-gradient(red, blue) fixed #fff"),
+            all(Color::WHITE, None, (true, true), (pct(0.0), pct(0.0)), auto)
+        );
+    }
+
+    #[test]
+    fn background_longhands() {
+        let px = |v: f32| Dim::Length(Length::Pt(v * 0.75));
+        let at = |length, from_end| PositionOffset { length, from_end };
+        assert_eq!(
+            parse("background-image", "url('logo.png')"),
+            Ok(vec![D::BackgroundImage(Some("logo.png".into()))])
+        );
+        assert_eq!(
+            parse("background-repeat", "repeat-y"),
+            Ok(vec![D::BackgroundRepeat(false, true)])
+        );
+        assert_eq!(
+            parse("background-repeat", "repeat no-repeat"),
+            Ok(vec![D::BackgroundRepeat(true, false)])
+        );
+        assert_eq!(
+            parse("background-position", "center bottom"),
+            Ok(vec![D::BackgroundPosition(
+                at(Dim::Percent(0.5), false),
+                at(Dim::Percent(1.0), false)
+            )])
+        );
+        assert_eq!(
+            parse("background-position", "10px bottom"),
+            Ok(vec![D::BackgroundPosition(
+                at(px(10.0), false),
+                at(Dim::Percent(1.0), false)
+            )])
+        );
+        assert_eq!(
+            parse("background-position", "right 4px bottom 10%"),
+            Ok(vec![D::BackgroundPosition(
+                at(px(4.0), true),
+                at(Dim::Percent(0.1), true)
+            )])
+        );
+        assert_eq!(
+            parse("background-position", "top 5px center"),
+            Ok(vec![D::BackgroundPosition(
+                at(Dim::Percent(0.5), false),
+                at(px(5.0), false)
+            )])
+        );
+        assert_eq!(
+            parse("background-position", "center"),
+            Ok(vec![D::BackgroundPosition(
+                at(Dim::Percent(0.5), false),
+                at(Dim::Percent(0.5), false)
+            )])
+        );
+        assert!(parse("background-position", "left right").is_err());
+        assert!(parse("background-position", "center 4px top").is_err());
+        assert!(parse("background-position", "bottom 10px").is_err());
+        assert_eq!(
+            parse("background-size", "50% auto"),
+            Ok(vec![D::BackgroundSize(BackgroundSizeValue::Explicit(
+                Some(Dim::Percent(0.5)),
+                None
+            ))])
+        );
     }
 
     #[test]
@@ -1687,6 +2041,6 @@ mod tests {
         let all: Vec<_> = LonghandId::all().collect();
         let unique: std::collections::HashSet<_> = all.iter().collect();
         assert_eq!(all.len(), unique.len());
-        assert_eq!(all.len(), 36 + 4 * 5 + 4);
+        assert_eq!(all.len(), 40 + 4 * 5 + 4);
     }
 }

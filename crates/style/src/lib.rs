@@ -22,7 +22,9 @@ pub mod stylesheet;
 pub mod values;
 
 pub use cascade::{Pseudo, Stylist};
-pub use computed::{BorderSide, ComputedStyle, DEFAULT_FONT_SIZE, TextDecorations, TextIndent};
+pub use computed::{
+    BackgroundSize, BorderSide, ComputedStyle, DEFAULT_FONT_SIZE, TextDecorations, TextIndent,
+};
 pub use properties::{
     BorderCollapse, BorderStyle, BoxSizing, Break, BreakInside, Content, ContentItem, Corner,
     CounterChanges, Display, FontFamilyName, GenericFamily, LineHeight, ListStyleType, TableLayout,

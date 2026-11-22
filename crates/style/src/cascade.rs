@@ -193,6 +193,9 @@ impl Stylist {
         for face in &mut sheet.font_faces {
             face.base.clone_from(&base);
         }
+        if let Some(base) = &base {
+            sheet.resolve_urls(base);
+        }
         self.add(origin, sheet);
     }
 
@@ -654,6 +657,29 @@ mod tests {
             "file:///site/fonts/brand.ttf"
         );
         assert_eq!(faces[1].base, None);
+    }
+
+    #[test]
+    fn background_urls_resolve_against_their_stylesheet() {
+        let doc = parse_html(b"<p style='background-image: url(inline.png)'>x</p><div>y</div>");
+        let fetcher = Fetcher::data_only();
+        let mut stylist = Stylist::for_document(&doc, &fetcher);
+        stylist.add_user_stylesheet(
+            "div { background: url(img/logo.png) no-repeat }",
+            Url::parse("file:///site/css/print.css").ok(),
+            &fetcher,
+        );
+        let html = doc.document_element().unwrap();
+        let root = stylist.style(&doc, html, None);
+        let div = stylist.style(&doc, doc.find_element("div").unwrap(), Some(&root));
+        assert_eq!(
+            div.background_image.as_deref(),
+            Some("file:///site/css/img/logo.png")
+        );
+        assert_eq!(div.background_repeat, (false, false));
+        // Document styles resolve against the document, later.
+        let p = stylist.style(&doc, doc.find_element("p").unwrap(), Some(&root));
+        assert_eq!(p.background_image.as_deref(), Some("inline.png"));
     }
 
     #[test]

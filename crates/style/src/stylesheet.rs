@@ -114,6 +114,21 @@ pub struct Stylesheet {
 }
 
 impl Stylesheet {
+    /// Makes the URLs in declarations absolute, relative to `base`, the
+    /// stylesheet's own URL: they would otherwise resolve against the
+    /// document.
+    pub(crate) fn resolve_urls(&mut self, base: &Url) {
+        for rule in &mut self.rules {
+            for declaration in &mut rule.declarations {
+                if let PropertyDeclaration::BackgroundImage(Some(url)) = &mut declaration.property
+                    && let Ok(absolute) = base.join(url.trim())
+                {
+                    *url = absolute.as_str().into();
+                }
+            }
+        }
+    }
+
     /// Parses a stylesheet. Invalid rules and declarations are skipped, as
     /// CSS error handling requires.
     ///

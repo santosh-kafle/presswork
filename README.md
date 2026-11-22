@@ -29,9 +29,12 @@ maintained, and accepts the same command line.
     `text-decoration-color`
   - boxes: `display`, `margin`, `padding`, `border` (solid, dashed, dotted
     and double; other styles are drawn solid), `border-radius`, `width`,
-    `max-width`, `height`, `min-height`, `max-height`, `box-sizing`,
-    `background-color`
-  - inline elements: `background-color`, `border`, `padding` and
+    `max-width`, `height`, `min-height`, `max-height`, `box-sizing`
+  - backgrounds: `background-color`, `background-image` (PNG, JPEG, GIF,
+    WebP; not gradients), `background-repeat`, `background-position`,
+    `background-size` (`cover`, `contain`, lengths) and the `background`
+    shorthand
+  - inline elements: backgrounds, `border`, `padding` and
     horizontal `margin` on `<span>`, `<a>`, `<strong>` and the like, drawn
     on each line the element covers; `display: inline-block` boxes, sized
     to their content or their `width` and aligned by their last line
@@ -47,8 +50,8 @@ maintained, and accepts the same command line.
   - fonts: `@font-face` with TrueType, OpenType and WOFF files, loaded only
     when text uses them
 - **Legacy HTML attributes** that wkhtmltopdf-era templates rely on:
-  `align`, `valign`, `width`, `height`, `bgcolor`, `border`, `cellpadding`,
-  `cellspacing`, `nowrap` and `<font>`.
+  `align`, `valign`, `width`, `height`, `bgcolor`, `background`, `border`,
+  `cellpadding`, `cellspacing`, `nowrap` and `<font>`.
 - **Images.** PNG, JPEG, GIF and WebP in `<img>`, inline or as blocks,
   sized by their attributes and CSS and scaled to fit with `max-width`. An
   image that fails to load is reported and replaced by its `alt` text.
@@ -132,7 +135,7 @@ maintained, and accepts the same command line.
   options. Page numbers work through the usual wkhtmltopdf script without
   running it; see below.
 
-Not yet: SVG and CSS background images, WOFF2 fonts and `unicode-range`,
+Not yet: SVG images, CSS gradients, WOFF2 fonts and `unicode-range`,
 floats and positioning, flexbox and grid, and the table of contents.
 
 ## Usage

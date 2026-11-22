@@ -13,9 +13,9 @@ use std::sync::Arc;
 use presswork_dom::{Document, NodeId};
 use presswork_style::{BoxSizing, ComputedStyle, Dimension};
 
+use super::Flow;
 use super::boxes::BoxGeometry;
 use super::inline::{Inline, InlineObject};
-use super::{BoxPaint, Flow};
 use crate::fragment::{Image, ImageData, Item};
 use crate::geometry::{Rect, Size};
 
@@ -160,7 +160,7 @@ impl Flow<'_, '_> {
 
         let mut items = Vec::new();
         if !self.is_measuring() {
-            if let Some(paint) = BoxPaint::from_style(style) {
+            if let Some(paint) = self.box_paint(style) {
                 paint.fills(border_box, &mut items);
             }
             if let Some(data) = data {

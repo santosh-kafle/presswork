@@ -44,6 +44,7 @@ use presswork_style::{Break, BreakInside, ComputedStyle, Dimension, Display, Pse
 
 use crate::fragment::{ImageData, Item, LinkTarget, Mark, MarkKind};
 use crate::geometry::{Point, Rect};
+use border::BackgroundImage;
 pub(crate) use border::BoxPaint;
 use boxes::BoxGeometry;
 pub(crate) use fonts::GenericFonts;
@@ -379,6 +380,18 @@ impl<'c, 'a> Flow<'c, 'a> {
         self.block_box(Source::Element(id), style, x, width);
     }
 
+    /// The background and borders of a box in `style`, with its background
+    /// image loaded; `None` while measuring, or if nothing shows.
+    fn box_paint(&mut self, style: &ComputedStyle) -> Option<BoxPaint> {
+        if self.is_measuring() {
+            return None;
+        }
+        let image = (style.background_image.as_deref())
+            .and_then(|url| self.cx.image(url))
+            .map(|data| BackgroundImage::new(style, data));
+        BoxPaint::from_style(style, image)
+    }
+
     /// Records the marks of the element `id`, whose box starts at `x`:
     /// its anchor name, and its heading title.
     fn mark_element(&mut self, id: NodeId, x: f32) {
@@ -500,7 +513,8 @@ impl<'c, 'a> Flow<'c, 'a> {
         let paint = if self.is_measuring() {
             None
         } else {
-            BoxPaint::from_style(style).or(tracked.then_some(BoxPaint::INVISIBLE))
+            self.box_paint(style)
+                .or(tracked.then_some(BoxPaint::INVISIBLE))
         };
         let decoration = paint.map(|paint| {
             self.canvas.decorations.push(Decoration {
@@ -638,7 +652,8 @@ impl<'c, 'a> Flow<'c, 'a> {
                         }
                         Display::Inline => {
                             let link = self.link_target(child);
-                            inline.enter((child, None), &child_style, width, link);
+                            let paint = self.box_paint(&child_style);
+                            inline.enter((child, None), &child_style, width, link, paint);
                             self.children(child, &child_style, x, width, inline);
                             inline.leave((child, None));
                         }
@@ -676,7 +691,8 @@ impl<'c, 'a> Flow<'c, 'a> {
         match style.display {
             Display::None => {}
             Display::Inline => {
-                inline.enter(key, style, width, None);
+                let paint = self.box_paint(style);
+                inline.enter(key, style, width, None, paint);
                 inline.push_text(&pseudo.text, style);
                 inline.leave(key);
             }

@@ -29,13 +29,22 @@ pub enum Item {
     Mark(Mark),
     /// A rounded box, or a border that is not solid.
     Shape(Shape),
+    /// A background image, tiled over an area.
+    ImageFill(ImageFill),
 }
 
 impl Item {
     pub(crate) fn translate(mut self, dx: f32, dy: f32) -> Self {
-        if let Item::Shape(shape) = &mut self {
-            shape.translate(dx, dy);
-            return self;
+        match &mut self {
+            Item::Shape(shape) => {
+                shape.translate(dx, dy);
+                return self;
+            }
+            Item::ImageFill(fill) => {
+                fill.translate(dx, dy);
+                return self;
+            }
+            _ => {}
         }
         let origin = match &mut self {
             Item::Text(run) => &mut run.origin,
@@ -43,7 +52,7 @@ impl Item {
             Item::Image(image) => &mut image.rect.origin,
             Item::Link(link) => &mut link.rect.origin,
             Item::Mark(mark) => &mut mark.origin,
-            Item::Shape(_) => unreachable!("translated above"),
+            Item::Shape(_) | Item::ImageFill(_) => unreachable!("translated above"),
         };
         origin.x += dx;
         origin.y += dy;
@@ -96,23 +105,56 @@ pub struct Shape {
 
 impl Shape {
     fn translate(&mut self, dx: f32, dy: f32) {
-        let shift = |point: &mut Point| {
+        translate_path(&mut self.path, dx, dy);
+        for point in self.clip.iter_mut().flatten() {
             point.x += dx;
             point.y += dy;
-        };
-        for op in &mut self.path {
-            match op {
-                PathOp::Move(p) | PathOp::Line(p) => shift(p),
-                PathOp::Cubic(a, b, c) => {
-                    shift(a);
-                    shift(b);
-                    shift(c);
-                }
-                PathOp::Close => {}
-            }
         }
-        for point in self.clip.iter_mut().flatten() {
-            shift(point);
+    }
+}
+
+fn translate_path(path: &mut [PathOp], dx: f32, dy: f32) {
+    let shift = |point: &mut Point| {
+        point.x += dx;
+        point.y += dy;
+    };
+    for op in path {
+        match op {
+            PathOp::Move(p) | PathOp::Line(p) => shift(p),
+            PathOp::Cubic(a, b, c) => {
+                shift(a);
+                shift(b);
+                shift(c);
+            }
+            PathOp::Close => {}
+        }
+    }
+}
+
+/// An image repeated over an area, side by side with no gaps: a CSS
+/// background image.
+#[derive(Debug, Clone)]
+pub struct ImageFill {
+    /// What may be painted: the box's background area.
+    pub clip: Vec<PathOp>,
+    /// The part of it painted: all of it, or a band along a repeating
+    /// axis, or one copy if the image does not repeat.
+    pub rect: Rect,
+    /// Where one copy is drawn; the others continue from it.
+    pub tile: Rect,
+    /// The distance from one copy to the next: the tile's size along an
+    /// axis that repeats, more than the painted area along one that does
+    /// not, so that no neighbour shows at its edge.
+    pub step: Size,
+    pub data: Arc<ImageData>,
+}
+
+impl ImageFill {
+    fn translate(&mut self, dx: f32, dy: f32) {
+        translate_path(&mut self.clip, dx, dy);
+        for origin in [&mut self.rect.origin, &mut self.tile.origin] {
+            origin.x += dx;
+            origin.y += dy;
         }
     }
 }

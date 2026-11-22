@@ -277,12 +277,12 @@ impl Inline {
         style: &ComputedStyle,
         containing_width: f32,
         link: Option<LinkTarget>,
+        paint: Option<BoxPaint>,
     ) {
         self.open.push((node, self.nesting.len()));
         self.nesting.push(style.clone());
         self.path = self.open.iter().map(|&(_, index)| index).collect();
 
-        let paint = BoxPaint::from_style(style);
         let margin = style
             .margin
             .map(|m| m.resolve(containing_width).unwrap_or(0.0).max(0.0));
@@ -301,7 +301,7 @@ impl Inline {
             border,
             padding,
         };
-        if paint.is_none()
+        if element.paint.is_none()
             && element.link.is_none()
             && element.start_width() <= 0.0
             && element.end_width() <= 0.0
@@ -1081,7 +1081,7 @@ impl LinePieces {
                 target: target.clone(),
             }));
         }
-        let Some(paint) = element.paint else {
+        let Some(paint) = element.paint.clone() else {
             return;
         };
 

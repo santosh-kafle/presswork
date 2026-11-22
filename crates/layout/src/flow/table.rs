@@ -50,6 +50,9 @@ struct Cell {
     /// Min- and max-content width of the border box.
     min: f32,
     max: f32,
+    /// Its background, and its borders unless they collapse; set when
+    /// the table is laid out.
+    paint: Option<BoxPaint>,
 }
 
 impl Cell {
@@ -232,6 +235,17 @@ impl Flow<'_, '_> {
             }
             None => style,
         };
+        for cell in rows.iter_mut().flat_map(|row| &mut row.cells) {
+            cell.paint = self.box_paint(&cell.style).map(|paint| match collapsed {
+                // The table draws collapsed borders.
+                Some(_) => BoxPaint {
+                    background: paint.background,
+                    image: paint.image,
+                    ..BoxPaint::INVISIBLE
+                },
+                None => paint,
+            });
+        }
 
         // The table's own box. Its content width is the grid's width.
         let probe = BoxGeometry::resolve(style, width, Some(0.0));
@@ -378,6 +392,7 @@ impl Flow<'_, '_> {
                         padding: cell_style.padding.map(|p| p.resolve(0.0).unwrap_or(0.0)),
                         min: 0.0,
                         max: 0.0,
+                        paint: None,
                         style: cell_style,
                     })
                 })
@@ -575,16 +590,7 @@ impl RowBlock<'_> {
         // Cell backgrounds, and borders unless they collapse.
         for (k, (row, cells)) in self.rows.iter().zip(&laid_out).enumerate() {
             for (cell, laid_out) in row.cells.iter().zip(cells) {
-                let paint = match self.collapsed {
-                    Some(_) => {
-                        (!cell.style.background_color.is_transparent()).then_some(BoxPaint {
-                            background: cell.style.background_color,
-                            ..BoxPaint::INVISIBLE
-                        })
-                    }
-                    None => BoxPaint::from_style(&cell.style),
-                };
-                if let Some(paint) = paint {
+                if let Some(paint) = &cell.paint {
                     let rect = Rect::new(
                         cell_x(cell),
                         tops[k],
