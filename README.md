@@ -71,8 +71,10 @@ maintained, and accepts the same command line.
   paragraphs leave at least two lines on each page.
 - **Text in any script the system has fonts for.** Text is shaped with
   HarfBuzz-compatible shaping, so Devanagari conjuncts and vowel signs render
-  correctly, and fonts fall back by script. Fonts are embedded and subsetted,
-  and the PDF text can be searched and copied.
+  correctly, and fonts fall back by script. Symbols (✔, ★, →) and emoji
+  that the text's fonts lack come from installed symbol and emoji fonts,
+  such as Noto Sans Symbols 2 and Noto Color Emoji. Fonts are embedded and
+  subsetted, and the PDF text can be searched and copied.
 - **Document metadata.** The `<title>` becomes the PDF title unless `--title`
   is given.
 - **Bookmarks and links.** Headings (`<h1>` to `<h6>`) become the PDF

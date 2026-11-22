@@ -47,6 +47,8 @@ use crate::geometry::{Point, Rect};
 pub(crate) use border::BoxPaint;
 use boxes::BoxGeometry;
 pub(crate) use fonts::GenericFonts;
+#[cfg(test)]
+pub(crate) use fonts::SYMBOL_FONTS;
 use generated::PseudoBox;
 pub(crate) use inline::Ink;
 use inline::{ElementKey, Inline};

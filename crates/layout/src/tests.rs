@@ -2057,3 +2057,40 @@ fn collapsed_table_borders_keep_their_style() {
         ShapePaint::Stroke { dash: Some(_), .. }
     ));
 }
+
+/// Whether `ch` is drawn with a real glyph (not the font's missing-glyph
+/// box, glyph 0) on the page.
+fn has_glyph(page: &Page, ch: char) -> bool {
+    runs(page).iter().any(|run| {
+        run.glyphs
+            .iter()
+            .any(|glyph| glyph.id != 0 && run.text[glyph.text_range.clone()].contains(ch))
+    })
+}
+
+#[test]
+fn a_danda_after_latin_text_finds_a_devanagari_font() {
+    // parley gives the danda the script of the Latin text before it; the
+    // Devanagari fallback font is the last resort.
+    let pages = layout("<p>Total: Rs. 500।</p>");
+    assert!(has_glyph(&pages[0], '।'));
+}
+
+#[test]
+fn symbols_in_latin_text_find_a_symbol_font() {
+    let mut engine = Engine::new();
+    let installed = super::flow::SYMBOL_FONTS
+        .iter()
+        .any(|name| engine.fonts.collection.family_id(name).is_some());
+    if !installed {
+        eprintln!("skipped: no symbol font installed");
+        return;
+    }
+    let pages = layout_fetching(
+        &mut engine,
+        "<p>Paid ✔ in full</p>",
+        &LayoutOptions::default(),
+        &Fetcher::data_only(),
+    );
+    assert!(has_glyph(&pages[0], '✔'));
+}
