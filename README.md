@@ -29,11 +29,16 @@ maintained, and accepts the same command line.
     `text-decoration-color`
   - boxes: `display`, `margin`, `padding`, `border` (solid, dashed, dotted
     and double; other styles are drawn solid), `border-radius`, `width`,
-    `max-width`, `height`, `min-height`, `max-height`, `box-sizing`
+    `max-width`, `height`, `min-height`, `max-height`, `box-sizing`,
+    `overflow` (clips content and contains floats)
+  - floats and positioning: `float`, `clear`, `position` (`relative`,
+    `absolute`, and `fixed`, which repeats on every page, for watermarks),
+    `top`, `right`, `bottom`, `left`, `inset`
   - backgrounds: `background-color`, `background-image` (PNG, JPEG, GIF,
-    WebP; not gradients), `background-repeat`, `background-position`,
-    `background-size` (`cover`, `contain`, lengths) and the `background`
-    shorthand
+    WebP and `linear-gradient()`), `background-repeat`,
+    `background-position`, `background-size` (`cover`, `contain`,
+    lengths) and the `background` shorthand. A background on `<html>` or
+    `<body>` covers every page
   - inline elements: backgrounds, `border`, `padding` and
     horizontal `margin` on `<span>`, `<a>`, `<strong>` and the like, drawn
     on each line the element covers; `display: inline-block` boxes, sized
@@ -135,8 +140,8 @@ maintained, and accepts the same command line.
   options. Page numbers work through the usual wkhtmltopdf script without
   running it; see below.
 
-Not yet: SVG images, CSS gradients, WOFF2 fonts and `unicode-range`,
-floats and positioning, flexbox and grid, and the table of contents.
+Not yet: SVG images, radial gradients, WOFF2 fonts and `unicode-range`,
+flexbox and grid, `z-index`, and the table of contents.
 
 ## Usage
 

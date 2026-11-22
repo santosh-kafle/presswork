@@ -76,9 +76,39 @@ impl Sink {
         };
         match before {
             Some(sibling) => doc.insert_before(sibling, child),
-            None => doc.append_child(parent, child),
+            None => {
+                // Elements nested deeper than the limit become siblings
+                // of the deepest allowed, as in Chrome.
+                let mut parent = parent;
+                if doc.element(child).is_some() {
+                    while depth(&doc, parent) >= MAX_DEPTH
+                        && let Some(up) = doc.node(parent).parent
+                    {
+                        parent = up;
+                    }
+                }
+                doc.append_child(parent, child)
+            }
         }
     }
+}
+
+/// How deep elements may nest: Chrome's limit. Layout recurses per level,
+/// so this bounds its stack and time.
+pub const MAX_DEPTH: usize = 512;
+
+/// The number of ancestors of `node`, up to the limit.
+fn depth(doc: &Document, node: NodeId) -> usize {
+    let mut depth = 0;
+    let mut current = doc.node(node).parent;
+    while let Some(parent) = current {
+        depth += 1;
+        if depth > MAX_DEPTH {
+            break;
+        }
+        current = doc.node(parent).parent;
+    }
+    depth
 }
 
 impl TreeSink for Sink {
@@ -223,6 +253,20 @@ mod tests {
                 other => format!("{other:?}"),
             })
             .collect()
+    }
+
+    #[test]
+    fn deep_nesting_stops_at_the_limit() {
+        let html = format!("{}x{}", "<div>".repeat(2000), "</div>".repeat(2000));
+        let doc = crate::parse_html(html.as_bytes());
+        let divs: Vec<NodeId> = doc
+            .descendants(doc.root())
+            .filter(|&n| doc.element(n).is_some_and(|e| e.name == "div"))
+            .collect();
+        assert_eq!(divs.len(), 2000, "every element is kept");
+        let deepest = divs.iter().map(|&n| depth(&doc, n)).max().unwrap();
+        assert_eq!(deepest, MAX_DEPTH);
+        assert!(doc.text_content(doc.root()).contains('x'));
     }
 
     #[test]

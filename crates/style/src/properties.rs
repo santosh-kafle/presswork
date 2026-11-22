@@ -200,6 +200,46 @@ keyword_enum! {
 }
 
 keyword_enum! {
+    /// `overflow` (and `overflow-x`, `overflow-y`, which set the same
+    /// value): content beyond the padding box is clipped unless `visible`.
+    /// Paper does not scroll, so `scroll` and `auto` clip as `hidden`.
+    Overflow {
+        Visible = "visible",
+        Hidden = "hidden" | "clip" | "scroll" | "auto",
+    }
+}
+
+keyword_enum! {
+    /// `position`. `sticky` is laid out as `relative`: there is no
+    /// scrolling on paper.
+    Position {
+        Static = "static",
+        Relative = "relative" | "sticky",
+        Absolute = "absolute",
+        Fixed = "fixed",
+    }
+}
+
+keyword_enum! {
+    /// `clear`: which floats a box goes below.
+    Clear {
+        None = "none",
+        Left = "left" | "inline-start",
+        Right = "right" | "inline-end",
+        Both = "both",
+    }
+}
+
+keyword_enum! {
+    /// `float`: which side a box is pushed to, for text to flow around it.
+    Float {
+        None = "none",
+        Left = "left" | "inline-start",
+        Right = "right" | "inline-end",
+    }
+}
+
+keyword_enum! {
     TableLayout {
         Auto = "auto",
         Fixed = "fixed",
@@ -301,6 +341,38 @@ pub enum LineHeight {
     Length(Length),
     /// A fraction of the element's font size, inherited as a length.
     Percent(f32),
+}
+
+/// A `background-image` value.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ImageValue {
+    /// As written, or resolved against its stylesheet.
+    Url(Arc<str>),
+    Gradient(Arc<GradientValue>),
+}
+
+impl From<&str> for ImageValue {
+    fn from(url: &str) -> Self {
+        ImageValue::Url(url.into())
+    }
+}
+
+/// A specified `linear-gradient()`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GradientValue {
+    pub direction: GradientDirection,
+    /// Colors with their positions along the gradient line, if given.
+    pub stops: Vec<(ColorValue, Option<Dim>)>,
+}
+
+/// Which way a linear gradient runs.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum GradientDirection {
+    /// In degrees, clockwise from pointing up (`to top` is 0, `to right`
+    /// 90).
+    Angle(f32),
+    /// Towards a corner (`to bottom right`).
+    Corner { right: bool, bottom: bool },
 }
 
 /// One axis of a `background-position`: an offset from the start (left
@@ -418,6 +490,11 @@ pub enum LonghandId {
     Orphans,
     Widows,
     TableLayout,
+    Float,
+    Clear,
+    Position,
+    Inset(Side),
+    Overflow,
     Content,
     CounterReset,
     CounterIncrement,
@@ -440,8 +517,9 @@ impl LonghandId {
             Display | BackgroundColor | Margin(_) | Padding(_) | BorderWidth(_)
             | BorderStyle(_) | BorderColor(_) | Width | Height | MaxWidth | MaxHeight
             | MinHeight | BoxSizing | VerticalAlign | BreakBefore | BreakAfter
-            | TextDecorationLine | TextDecorationColor | BreakInside | TableLayout | Content
-            | CounterReset | CounterIncrement | CounterSet | BorderRadius(_) | BackgroundImage
+            | TextDecorationLine | TextDecorationColor | BreakInside | TableLayout | Float
+            | Clear | Position | Inset(_) | Overflow | Content | CounterReset
+            | CounterIncrement | CounterSet | BorderRadius(_) | BackgroundImage
             | BackgroundRepeat | BackgroundPosition | BackgroundSize => false,
         }
     }
@@ -482,6 +560,10 @@ impl LonghandId {
             Orphans,
             Widows,
             TableLayout,
+            Float,
+            Clear,
+            Position,
+            Overflow,
             Content,
             CounterReset,
             CounterIncrement,
@@ -498,6 +580,7 @@ impl LonghandId {
                 BorderWidth(side),
                 BorderStyle(side),
                 BorderColor(side),
+                Inset(side),
             ]
         });
         let corners = Corner::ALL.into_iter().map(BorderRadius);
@@ -554,15 +637,20 @@ pub enum PropertyDeclaration {
     /// At least 1.
     Widows(u32),
     TableLayout(TableLayout),
+    Float(Float),
+    Clear(Clear),
+    Position(Position),
+    Overflow(Overflow),
+    /// `top`, `right`, `bottom` or `left`; `auto` is [`Dim::Auto`].
+    Inset(Side, Dim),
     Content(Content),
     CounterReset(CounterChanges),
     CounterIncrement(CounterChanges),
     CounterSet(CounterChanges),
     /// Horizontal and vertical radius.
     BorderRadius(Corner, Dim, Dim),
-    /// The image's URL, as written (or resolved against its stylesheet);
     /// `None` for `none`.
-    BackgroundImage(Option<Arc<str>>),
+    BackgroundImage(Option<ImageValue>),
     /// Whether the image repeats horizontally and vertically.
     BackgroundRepeat(bool, bool),
     /// Horizontal and vertical offset; keywords are percentages.
@@ -614,6 +702,11 @@ impl PropertyDeclaration {
             D::Orphans(_) => LonghandId::Orphans,
             D::Widows(_) => LonghandId::Widows,
             D::TableLayout(_) => LonghandId::TableLayout,
+            D::Float(_) => LonghandId::Float,
+            D::Clear(_) => LonghandId::Clear,
+            D::Position(_) => LonghandId::Position,
+            D::Overflow(_) => LonghandId::Overflow,
+            D::Inset(side, _) => LonghandId::Inset(*side),
             D::Content(_) => LonghandId::Content,
             D::CounterReset(_) => LonghandId::CounterReset,
             D::CounterIncrement(_) => LonghandId::CounterIncrement,
@@ -695,6 +788,15 @@ pub fn longhands_of(name: &str) -> Option<Vec<LonghandId>> {
         "orphans" => one(L::Orphans),
         "widows" => one(L::Widows),
         "table-layout" => one(L::TableLayout),
+        "float" => one(L::Float),
+        "clear" => one(L::Clear),
+        "position" => one(L::Position),
+        "overflow" | "overflow-x" | "overflow-y" => one(L::Overflow),
+        "top" => one(L::Inset(Side::Top)),
+        "right" => one(L::Inset(Side::Right)),
+        "bottom" => one(L::Inset(Side::Bottom)),
+        "left" => one(L::Inset(Side::Left)),
+        "inset" => Some(sided(L::Inset)),
         "content" => one(L::Content),
         "counter-reset" => one(L::CounterReset),
         "counter-increment" => one(L::CounterIncrement),
@@ -784,6 +886,7 @@ pub fn parse_declaration(
         "border-style" => four_sides(input, BorderStyle::parse, D::BorderStyle, out)?,
         "border-color" => four_sides(input, ColorValue::parse, D::BorderColor, out)?,
         "border" => parse_border(input, &Side::ALL, out)?,
+        "inset" => four_sides(input, |i| Dim::parse(i, true, true), D::Inset, out)?,
         "border-top" => parse_border(input, &[Side::Top], out)?,
         "border-right" => parse_border(input, &[Side::Right], out)?,
         "border-bottom" => parse_border(input, &[Side::Bottom], out)?,
@@ -846,6 +949,11 @@ fn parse_longhand(id: LonghandId, input: &mut Parser<'_>) -> Parsed<PropertyDecl
         L::Orphans => D::Orphans(parse_line_count(input)?),
         L::Widows => D::Widows(parse_line_count(input)?),
         L::TableLayout => D::TableLayout(TableLayout::parse(input)?),
+        L::Float => D::Float(Float::parse(input)?),
+        L::Clear => D::Clear(Clear::parse(input)?),
+        L::Position => D::Position(Position::parse(input)?),
+        L::Overflow => D::Overflow(parse_overflow(input)?),
+        L::Inset(side) => D::Inset(side, Dim::parse(input, true, true)?),
         L::Content => D::Content(parse_content(input)?),
         L::CounterReset => D::CounterReset(parse_counter_changes(input, 0)?),
         L::CounterIncrement => D::CounterIncrement(parse_counter_changes(input, 1)?),
@@ -1151,13 +1259,106 @@ fn parse_background(input: &mut Parser<'_>, out: &mut Vec<PropertyDeclaration>) 
     ]);
 }
 
-/// `background-image`: `none` or a `url()`.
-fn parse_background_image(input: &mut Parser<'_>) -> Parsed<Option<Arc<str>>> {
+/// `overflow`: one keyword, or one per axis (`hidden visible`), which
+/// clips if either does.
+fn parse_overflow(input: &mut Parser<'_>) -> Parsed<Overflow> {
+    let first = Overflow::parse(input)?;
+    let second = input.try_parse(Overflow::parse).unwrap_or(first);
+    Ok(if first == Overflow::Visible {
+        second
+    } else {
+        first
+    })
+}
+
+/// `background-image`: `none`, a `url()` or a `linear-gradient()`.
+fn parse_background_image(input: &mut Parser<'_>) -> Parsed<Option<ImageValue>> {
     if input.try_parse(|i| i.expect_ident_matching("none")).is_ok() {
         return Ok(None);
     }
-    let url = input.expect_url().map_err(Invalid::from)?;
-    Ok(Some(url.as_ref().into()))
+    if let Ok(url) = input.try_parse(|i| i.expect_url()) {
+        return Ok(Some(ImageValue::Url(url.as_ref().into())));
+    }
+    input
+        .expect_function_matching("linear-gradient")
+        .map_err(Invalid::from)?;
+    let gradient = input.parse_nested_block(|i| {
+        parse_linear_gradient(i).map_err(|_| i.new_error_for_next_token::<Invalid>())
+    })?;
+    Ok(Some(ImageValue::Gradient(Arc::new(gradient))))
+}
+
+/// The arguments of `linear-gradient()`: an optional angle or `to` side
+/// or corner, then two or more colors, each optionally with a position
+/// (or two). Color hints are not supported.
+fn parse_linear_gradient(input: &mut Parser<'_>) -> Parsed<GradientValue> {
+    let angle = |input: &mut Parser<'_>| -> Parsed<f32> {
+        match *input.next().map_err(Invalid::from)? {
+            Token::Dimension {
+                value, ref unit, ..
+            } => Ok(match unit.to_ascii_lowercase().as_str() {
+                "deg" => value,
+                "grad" => value * 0.9,
+                "rad" => value.to_degrees(),
+                "turn" => value * 360.0,
+                _ => return Err(Invalid),
+            }),
+            Token::Number { value: 0.0, .. } => Ok(0.0),
+            _ => Err(Invalid),
+        }
+    };
+    let to = |input: &mut Parser<'_>| -> Parsed<GradientDirection> {
+        input.expect_ident_matching("to").map_err(Invalid::from)?;
+        let (mut horizontal, mut vertical) = (None, None);
+        for _ in 0..2 {
+            let Ok(ident) = input.try_parse(|i| i.expect_ident_cloned()) else {
+                break;
+            };
+            match ident.to_ascii_lowercase().as_str() {
+                "left" if horizontal.is_none() => horizontal = Some(false),
+                "right" if horizontal.is_none() => horizontal = Some(true),
+                "top" if vertical.is_none() => vertical = Some(false),
+                "bottom" if vertical.is_none() => vertical = Some(true),
+                _ => return Err(Invalid),
+            }
+        }
+        Ok(match (horizontal, vertical) {
+            (Some(right), Some(bottom)) => GradientDirection::Corner { right, bottom },
+            (Some(right), None) => GradientDirection::Angle(if right { 90.0 } else { 270.0 }),
+            (None, Some(bottom)) => GradientDirection::Angle(if bottom { 180.0 } else { 0.0 }),
+            (None, None) => return Err(Invalid),
+        })
+    };
+    let direction = if let Ok(degrees) = input.try_parse(angle) {
+        Some(GradientDirection::Angle(degrees))
+    } else {
+        input.try_parse(to).ok()
+    };
+    if direction.is_some() {
+        input.expect_comma().map_err(Invalid::from)?;
+    }
+    let mut stops = Vec::new();
+    loop {
+        let color = ColorValue::parse(input)?;
+        let first = input.try_parse(|i| Dim::parse(i, false, true)).ok();
+        stops.push((color, first));
+        if first.is_some()
+            && let Ok(second) = input.try_parse(|i| Dim::parse(i, false, true))
+        {
+            stops.push((color, Some(second)));
+        }
+        if input.try_parse(|i| i.expect_comma()).is_err() {
+            break;
+        }
+    }
+    input.expect_exhausted().map_err(Invalid::from)?;
+    if stops.len() < 2 {
+        return Err(Invalid);
+    }
+    Ok(GradientValue {
+        direction: direction.unwrap_or(GradientDirection::Angle(180.0)),
+        stops,
+    })
 }
 
 /// `background-repeat`: one keyword, or one for each axis.
@@ -1832,7 +2033,7 @@ mod tests {
                    size: BackgroundSizeValue| {
             Ok(vec![
                 D::BackgroundColor(ColorValue::Color(color)),
-                D::BackgroundImage(image.map(Arc::from)),
+                D::BackgroundImage(image.map(ImageValue::from)),
                 D::BackgroundRepeat(repeat.0, repeat.1),
                 D::BackgroundPosition(position.0, position.1),
                 D::BackgroundSize(size),
@@ -1861,9 +2062,41 @@ mod tests {
         );
         // Unsupported parts do not lose the color.
         assert_eq!(
-            parse("background", "linear-gradient(red, blue) fixed #fff"),
+            parse("background", "radial-gradient(red, blue) fixed #fff"),
             all(Color::WHITE, None, (true, true), (pct(0.0), pct(0.0)), auto)
         );
+    }
+
+    #[test]
+    fn linear_gradients() {
+        let gradient = |css: &str| match parse("background-image", css) {
+            Ok(mut declarations) => match declarations.pop() {
+                Some(D::BackgroundImage(Some(ImageValue::Gradient(g)))) => Some((*g).clone()),
+                other => panic!("{other:?}"),
+            },
+            Err(_) => None,
+        };
+        let red = ColorValue::Color(Color::rgb(255, 0, 0));
+        let g = gradient("linear-gradient(red, blue)").unwrap();
+        assert_eq!(g.direction, GradientDirection::Angle(180.0));
+        assert_eq!(g.stops.len(), 2);
+        assert_eq!(g.stops[0], (red, None));
+        let g = gradient("linear-gradient(to right, red 10%, #fff 20% 40%, blue)").unwrap();
+        assert_eq!(g.direction, GradientDirection::Angle(90.0));
+        assert_eq!(g.stops.len(), 4, "two positions make two stops");
+        assert_eq!(g.stops[1].1, Some(Dim::Percent(0.2)));
+        let g = gradient("linear-gradient(0.25turn, red, blue)").unwrap();
+        assert_eq!(g.direction, GradientDirection::Angle(90.0));
+        let g = gradient("linear-gradient(to top left, red, blue)").unwrap();
+        assert_eq!(
+            g.direction,
+            GradientDirection::Corner {
+                right: false,
+                bottom: false
+            }
+        );
+        assert!(gradient("linear-gradient(red)").is_none());
+        assert!(gradient("linear-gradient(to middle, red, blue)").is_none());
     }
 
     #[test]
@@ -2041,6 +2274,6 @@ mod tests {
         let all: Vec<_> = LonghandId::all().collect();
         let unique: std::collections::HashSet<_> = all.iter().collect();
         assert_eq!(all.len(), unique.len());
-        assert_eq!(all.len(), 40 + 4 * 5 + 4);
+        assert_eq!(all.len(), 44 + 4 * 6 + 4);
     }
 }

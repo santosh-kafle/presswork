@@ -24,6 +24,19 @@ impl Flow<'_, '_> {
         width: f32,
         inline: &mut Inline,
     ) {
+        let object = self.atomic_box(source, style, width);
+        inline.push_box(object, style);
+    }
+
+    /// Lays out a block container holding `source` on its own, as an
+    /// inline-block or a float is: its own width or shrink-to-fit, in a
+    /// containing block `width` wide. While measuring, only its widths.
+    pub(super) fn atomic_box(
+        &mut self,
+        source: Source<'_>,
+        style: &ComputedStyle,
+        width: f32,
+    ) -> InlineObject {
         let measuring = self.is_measuring();
         // Percentages have no basis while measuring.
         let basis = if measuring { 0.0 } else { width };
@@ -61,7 +74,7 @@ impl Flow<'_, '_> {
                 style.vertical_align,
                 Vec::new(),
             );
-            return inline.push_box(object, style);
+            return object;
         }
 
         let content_width = match specified {
@@ -79,6 +92,7 @@ impl Flow<'_, '_> {
             Source::Generated(_) => None,
         };
         let mut flow = Flow::new(self.cx);
+        flow.set_root_area(content_width, None);
         flow.link = link;
         flow.contents(source, style, 0.0, content_width);
         let baseline = flow.baseline;
@@ -110,7 +124,7 @@ impl Flow<'_, '_> {
             items,
         );
         object.baseline = baseline.map(|baseline| content_top + baseline as f32);
-        inline.push_box(object, style);
+        object
     }
 
     /// The min- and max-content widths of what a block container holds.

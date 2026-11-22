@@ -3,9 +3,12 @@
 
 use std::sync::Arc;
 
-use presswork_style::{BackgroundSize, BorderStyle, Color, ComputedStyle, Corner, Dimension, Side};
+use presswork_style::{
+    BackgroundSize, BorderStyle, Color, ComputedStyle, Corner, Dimension, Gradient,
+    GradientDirection, Side,
+};
 
-use crate::fragment::{Fill, ImageData, ImageFill, Item, PathOp, Shape, ShapePaint};
+use crate::fragment::{Fill, GradientFill, ImageData, ImageFill, Item, PathOp, Shape, ShapePaint};
 use crate::geometry::{Point, Rect, Size};
 
 /// The background and borders of a box.
@@ -13,6 +16,7 @@ use crate::geometry::{Point, Rect, Size};
 pub(crate) struct BoxPaint {
     pub background: Color,
     pub image: Option<BackgroundImage>,
+    pub gradient: Option<Arc<Gradient>>,
     /// Width and color of each border; a width of zero means no border.
     pub border: [(Side, f32, Color); 4],
     /// The style of each border, in the order of `border`.
@@ -94,6 +98,7 @@ impl BoxPaint {
     pub const INVISIBLE: Self = Self {
         background: Color::TRANSPARENT,
         image: None,
+        gradient: None,
         border: [
             (Side::Top, 0.0, Color::TRANSPARENT),
             (Side::Right, 0.0, Color::TRANSPARENT),
@@ -111,12 +116,14 @@ impl BoxPaint {
         let border = Side::ALL.map(|side| (side, widths.get(side), style.border_color(side)));
         let visible = !style.background_color.is_transparent()
             || image.is_some()
+            || style.background_gradient.is_some()
             || border
                 .iter()
                 .any(|(_, width, color)| *width > 0.0 && !color.is_transparent());
         visible.then_some(Self {
             background: style.background_color,
             image,
+            gradient: style.background_gradient.clone(),
             border,
             styles: Side::ALL.map(|side| style.border.get(side).style),
             radii: style.border_radius,
@@ -181,6 +188,9 @@ impl BoxPaint {
                 }));
             }
         }
+        if let Some(gradient) = &self.gradient {
+            self.gradient_fill(gradient, whole, outline.clone(), out);
+        }
         if let Some(image) = &self.image {
             self.image_fill(image, piece, whole, outline, out);
         }
@@ -189,6 +199,56 @@ impl BoxPaint {
         } else {
             self.rounded(piece, radii, out);
         }
+    }
+
+    /// Appends a gradient across the padding box of `whole`, painted
+    /// within `outline` (CSS Images 3, section 3.1).
+    fn gradient_fill(
+        &self,
+        gradient: &Gradient,
+        whole: Rect,
+        outline: Vec<PathOp>,
+        out: &mut Vec<Item>,
+    ) {
+        let widths = Side::ALL.map(|side| self.edge(side).0);
+        let area = inset(whole, widths);
+        let (w, h) = (area.size.width, area.size.height);
+        // The direction it runs in, as a unit vector (y down).
+        let (dx, dy) = match gradient.direction {
+            GradientDirection::Angle(degrees) => {
+                let radians = degrees.to_radians();
+                (radians.sin(), -radians.cos())
+            }
+            // Perpendicular to the diagonal between the two neighbouring
+            // corners, into the named one.
+            GradientDirection::Corner { right, bottom } => {
+                let (sx, sy) = (
+                    if right { 1.0 } else { -1.0 },
+                    if bottom { 1.0 } else { -1.0 },
+                );
+                let (x, y) = (sx * h, sy * w);
+                let norm = x.hypot(y);
+                if norm <= 0.0 {
+                    return;
+                }
+                (x / norm, y / norm)
+            }
+        };
+        // Long enough that the corners get the end colors.
+        let length = (w * dx).abs() + (h * dy).abs();
+        if length <= 0.0 {
+            return;
+        }
+        let center = Point::new(area.origin.x + w / 2.0, area.origin.y + h / 2.0);
+        let half = length / 2.0;
+        let start = Point::new(center.x - dx * half, center.y - dy * half);
+        let end = Point::new(center.x + dx * half, center.y + dy * half);
+        out.push(Item::GradientFill(GradientFill {
+            clip: outline,
+            start,
+            end,
+            stops: stop_offsets(&gradient.stops, length),
+        }));
     }
 
     /// Appends the background image: sized and positioned in the padding
@@ -407,6 +467,55 @@ impl BoxPaint {
             ));
         }
     }
+}
+
+/// Gradient stops with offsets from 0 to 1 along a gradient line `length`
+/// long: missing positions spread evenly between their neighbours, and
+/// each at least the one before (CSS Images 3, section 3.5.3).
+fn stop_offsets(stops: &[(Color, Option<Dimension>)], length: f32) -> Vec<(f32, Color)> {
+    let mut offsets: Vec<Option<f32>> = stops
+        .iter()
+        .map(|(_, at)| {
+            at.map(|at| match at {
+                Dimension::Percent(fraction) => fraction,
+                other => other.resolve(length).unwrap_or(0.0) / length,
+            })
+        })
+        .collect();
+    let last = offsets.len().saturating_sub(1);
+    if let Some(first) = offsets.first_mut() {
+        first.get_or_insert(0.0);
+    }
+    if let Some(end) = offsets.last_mut() {
+        end.get_or_insert(1.0);
+    }
+    let mut max = f32::NEG_INFINITY;
+    for offset in offsets.iter_mut().flatten() {
+        max = max.max(*offset);
+        *offset = max;
+    }
+    let mut index = 0;
+    while index < last {
+        if offsets[index + 1].is_some() {
+            index += 1;
+            continue;
+        }
+        let from = offsets[index].unwrap_or(0.0);
+        let next = (index + 1..=last)
+            .find(|&i| offsets[i].is_some())
+            .unwrap_or(last);
+        let to = offsets[next].unwrap_or(1.0);
+        let steps = (next - index) as f32;
+        for (k, offset) in offsets[index + 1..next].iter_mut().enumerate() {
+            *offset = Some(from + (to - from) * (k + 1) as f32 / steps);
+        }
+        index = next;
+    }
+    stops
+        .iter()
+        .zip(offsets)
+        .map(|((color, _), offset)| (offset.unwrap_or(0.0).clamp(0.0, 1.0), *color))
+        .collect()
 }
 
 /// Appends a filled rectangle, if it has an area and a color.
@@ -670,6 +779,30 @@ mod tests {
         let (dot, spacing) = dash_pattern(10.0, 1.0, true, false);
         assert_eq!(dot, 0.0);
         assert!((10.0 / spacing).fract().abs() < 1e-4);
+    }
+
+    #[test]
+    fn gradient_stops_spread_and_never_go_back() {
+        let red = Color::rgb(255, 0, 0);
+        let at = |offsets: &[Option<Dimension>]| -> Vec<f32> {
+            let stops: Vec<_> = offsets.iter().map(|&o| (red, o)).collect();
+            stop_offsets(&stops, 200.0).iter().map(|s| s.0).collect()
+        };
+        assert_eq!(at(&[None, None, None]), [0.0, 0.5, 1.0]);
+        assert_eq!(
+            at(&[
+                None,
+                Some(Dimension::Percent(0.8)),
+                None,
+                Some(Dimension::Pt(20.0))
+            ]),
+            [0.0, 0.8, 0.8, 0.8],
+            "a stop before an earlier one moves to it"
+        );
+        assert_eq!(
+            at(&[Some(Dimension::Pt(50.0)), None, None]),
+            [0.25, 0.625, 1.0]
+        );
     }
 
     #[test]

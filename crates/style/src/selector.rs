@@ -199,6 +199,16 @@ pub(crate) struct ElementRef<'a> {
     id: NodeId,
 }
 
+impl<'a> ElementRef<'a> {
+    pub fn document(&self) -> &'a Document {
+        self.doc
+    }
+
+    pub fn node(&self) -> NodeId {
+        self.id
+    }
+}
+
 impl fmt::Debug for ElementRef<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "<{}> {}", self.data().name, self.id)

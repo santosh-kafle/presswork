@@ -4,11 +4,21 @@ use std::sync::Arc;
 
 use crate::properties::{
     BORDER_WIDTH_MEDIUM, BackgroundSizeValue, BorderCollapse, BorderStyle, BoxSizing, Break,
-    BreakInside, Content, CounterChanges, CssWide, Display, FontFamilyName, FontSize, FontWeight,
-    GenericFamily, LineHeight, ListStyleType, LonghandId, PositionOffset, PropertyDeclaration,
-    TableLayout, TextAlign, TextDecorationLine, TextTransform, VerticalAlign, WhiteSpace,
+    BreakInside, Clear, Content, CounterChanges, CssWide, Display, Float, FontFamilyName, FontSize,
+    FontWeight, GenericFamily, GradientDirection, ImageValue, LineHeight, ListStyleType,
+    LonghandId, Overflow, Position, PositionOffset, PropertyDeclaration, TableLayout, TextAlign,
+    TextDecorationLine, TextTransform, VerticalAlign, WhiteSpace,
 };
 use crate::values::{Color, ColorValue, Dim, Dimension, Length, Side, Sides};
+
+/// A computed `linear-gradient()`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Gradient {
+    pub direction: GradientDirection,
+    /// Colors with their positions along the gradient line, if given;
+    /// percentages are of its length.
+    pub stops: Vec<(Color, Option<Dimension>)>,
+}
 
 /// A computed `background-size`.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -148,6 +158,12 @@ pub struct ComputedStyle {
     pub break_after: Break,
     pub break_inside: BreakInside,
     pub table_layout: TableLayout,
+    pub float: Float,
+    pub clear: Clear,
+    pub position: Position,
+    pub overflow: Overflow,
+    /// `top`, `right`, `bottom`, `left`.
+    pub inset: Sides<Dimension>,
     /// The fewest lines of a paragraph to leave at the bottom of a page.
     pub orphans: u32,
     /// The fewest lines of a paragraph to carry to the top of a page.
@@ -162,6 +178,8 @@ pub struct ComputedStyle {
     pub word_spacing: f32,
     /// The background image's URL, if any.
     pub background_image: Option<Arc<str>>,
+    /// The background gradient, if any, instead of an image.
+    pub background_gradient: Option<Arc<Gradient>>,
     /// Whether the background image repeats horizontally and vertically.
     pub background_repeat: (bool, bool),
     /// Offsets of the background image in its positioning area (the
@@ -219,6 +237,11 @@ impl ComputedStyle {
             break_after: Break::Auto,
             break_inside: BreakInside::Auto,
             table_layout: TableLayout::Auto,
+            float: Float::None,
+            clear: Clear::None,
+            position: Position::Static,
+            overflow: Overflow::Visible,
+            inset: Sides::uniform(Dimension::Auto),
             orphans: 2,
             widows: 2,
             min_height: Dimension::Auto,
@@ -234,6 +257,7 @@ impl ComputedStyle {
             word_spacing: 0.0,
             border_radius: [(Dimension::ZERO, Dimension::ZERO); 4],
             background_image: None,
+            background_gradient: None,
             background_repeat: (true, true),
             background_position: (
                 (Dimension::Percent(0.0), false),
@@ -269,7 +293,11 @@ impl ComputedStyle {
         match id {
             L::Display => self.display = other.display,
             L::Content => self.content = other.content.clone(),
-            L::BackgroundImage => self.background_image.clone_from(&other.background_image),
+            L::BackgroundImage => {
+                self.background_image.clone_from(&other.background_image);
+                self.background_gradient
+                    .clone_from(&other.background_gradient);
+            }
             L::BackgroundRepeat => self.background_repeat = other.background_repeat,
             L::BackgroundPosition => self.background_position = other.background_position,
             L::BackgroundSize => self.background_size = other.background_size,
@@ -315,6 +343,11 @@ impl ComputedStyle {
             L::Orphans => self.orphans = other.orphans,
             L::Widows => self.widows = other.widows,
             L::TableLayout => self.table_layout = other.table_layout,
+            L::Float => self.float = other.float,
+            L::Clear => self.clear = other.clear,
+            L::Position => self.position = other.position,
+            L::Overflow => self.overflow = other.overflow,
+            L::Inset(side) => self.inset.set(side, other.inset.get(side)),
         }
     }
 
@@ -339,7 +372,25 @@ impl ComputedStyle {
         match declaration {
             D::Display(v) => self.display = *v,
             D::Content(v) => self.content = v.clone(),
-            D::BackgroundImage(v) => self.background_image.clone_from(v),
+            D::BackgroundImage(v) => {
+                self.background_image = None;
+                self.background_gradient = None;
+                match v {
+                    Some(ImageValue::Url(url)) => self.background_image = Some(Arc::clone(url)),
+                    Some(ImageValue::Gradient(gradient)) => {
+                        let color = self.color;
+                        self.background_gradient = Some(Arc::new(Gradient {
+                            direction: gradient.direction,
+                            stops: (gradient.stops.iter())
+                                .map(|(c, at)| {
+                                    (c.resolve(color), at.map(|d| d.compute(font_size, root)))
+                                })
+                                .collect(),
+                        }));
+                    }
+                    None => {}
+                }
+            }
             D::BackgroundRepeat(x, y) => self.background_repeat = (*x, *y),
             D::BackgroundPosition(x, y) => {
                 let compute = |p: &PositionOffset| (p.length.compute(font_size, root), p.from_end);
@@ -432,6 +483,11 @@ impl ComputedStyle {
             D::Orphans(v) => self.orphans = *v,
             D::Widows(v) => self.widows = *v,
             D::TableLayout(v) => self.table_layout = *v,
+            D::Float(v) => self.float = *v,
+            D::Clear(v) => self.clear = *v,
+            D::Position(v) => self.position = *v,
+            D::Overflow(v) => self.overflow = *v,
+            D::Inset(side, v) => self.inset.set(*side, v.compute(font_size, root)),
             D::CssWide(id, keyword) => {
                 let inherit = match keyword {
                     CssWide::Inherit => true,

@@ -26,7 +26,7 @@ use presswork_style::{
 use crate::Engine;
 use crate::flow;
 use crate::fragment::{Fill, Item, Page};
-use crate::geometry::{EdgeSizes, Rect};
+use crate::geometry::{EdgeSizes, Rect, Size};
 
 /// Which margin a line of text goes in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -117,6 +117,9 @@ impl Engine {
             web_fonts: flow::WebFonts::new(&[], 0),
             load_images: false,
             images: HashMap::new(),
+            page: Size::default(),
+            fixed: Vec::new(),
+            page_background_owner: None,
         };
         let mut css = ComputedStyle::initial();
         css.font_family = Arc::new([
@@ -184,6 +187,9 @@ impl Engine {
             web_fonts: flow::WebFonts::new(styles.font_faces(), self.layouts),
             load_images: images,
             images: HashMap::new(),
+            page: Size::default(),
+            fixed: Vec::new(),
+            page_background_owner: None,
         };
         self.layouts += 1;
         let mut flow = flow::Flow::new(&mut cx);

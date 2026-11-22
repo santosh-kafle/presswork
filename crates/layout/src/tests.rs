@@ -2211,3 +2211,248 @@ fn background_images_on_inline_elements_and_cells() {
     ));
     assert_eq!(image_fills(&pages[0]).len(), 2);
 }
+
+#[test]
+fn text_flows_around_a_left_float_and_back_under_it() {
+    let text = "word ".repeat(80);
+    let pages = layout(&format!(
+        "<body style='margin:0'><div style='width:200pt'><div style='float:left; width:50pt;
+         height:30pt; background:red'></div><p style='margin:0'>{text}</p></div>"
+    ));
+    let page = &pages[0];
+    let float = fills_of(page, RED)[0];
+    assert!(approx(float.origin.x, M) && approx(float.size.width, 50.0));
+    let lines = runs(page);
+    assert!(approx(lines[0].origin.x, M + 50.0), "beside the float");
+    let below = lines
+        .iter()
+        .find(|run| run.origin.y > float.origin.y + 40.0)
+        .expect("a line below the float");
+    assert!(approx(below.origin.x, M), "back at the left edge");
+    for run in &lines {
+        assert!(right_edge(run) <= M + 200.5, "within the block");
+    }
+}
+
+#[test]
+fn a_right_float_shares_the_line_it_starts() {
+    let pages = layout(
+        "<body style='margin:0'><div style='width:300pt'><p>Total <span style='float:right'>Rs 500</span></p></div>",
+    );
+    let page = &pages[0];
+    let total = run_with(page, "Total");
+    let amount = run_with(page, "Rs");
+    assert!(approx(amount.origin.y, total.origin.y), "same line");
+    assert!(approx(right_edge(amount), M + 300.0), "at the right edge");
+}
+
+#[test]
+fn floats_sit_side_by_side_until_they_do_not_fit() {
+    let pages = layout(
+        "<body style='margin:0'><div style='width:300pt'>
+         <div style='float:left; width:140pt; height:20pt; background:red'></div>
+         <div style='float:left; width:140pt; height:20pt; background:red'></div>
+         <div style='float:left; width:140pt; height:20pt; background:red'></div></div>",
+    );
+    let boxes = fills_of(&pages[0], RED);
+    assert_eq!(boxes.len(), 3);
+    assert!(approx(boxes[1].origin.x, M + 140.0) && approx(boxes[1].origin.y, boxes[0].origin.y));
+    assert!(approx(boxes[2].origin.x, M), "the third goes below");
+    assert!(approx(boxes[2].origin.y, boxes[0].origin.y + 20.0));
+}
+
+#[test]
+fn clear_and_clearfix_go_below_floats() {
+    let pages = layout(
+        "<style>.cf::after { content: ''; display: table; clear: both }</style>
+         <body style='margin:0'><div class=cf style='border-bottom:1pt solid blue'>
+         <div style='float:right; width:50pt; height:40pt; background:red'></div>short</div>
+         <p style='clear:both; margin:0'>after</p>",
+    );
+    let page = &pages[0];
+    let float = fills_of(page, RED)[0];
+    let float_bottom = float.origin.y + float.size.height;
+    let border = fills_of(page, BLUE)[0];
+    assert!(
+        border.origin.y >= float_bottom - 0.05,
+        "the box contains its float"
+    );
+    assert!(run_with(page, "after").origin.y > float_bottom);
+}
+
+#[test]
+fn cells_and_floated_images_and_tables() {
+    let pages = layout(&format!(
+        "<body style='margin:0'><table><tr><td style='background:blue'>
+         <div style='float:left; width:30pt; height:60pt'></div>a</td></tr></table>
+         <div style='width:300pt'><img src='{PNG}' style='float:right; width:40pt'>
+         <table style='float:left; border:1pt solid red'><tr><td>x</td></tr></table>text</div>"
+    ));
+    let page = &pages[0];
+    let cell = fills_of(page, BLUE)[0];
+    assert!(
+        cell.size.height >= 60.0,
+        "a cell contains its floats: {cell:?}"
+    );
+    let image = images(page)[0];
+    assert!(approx(image.origin.x + image.size.width, M + 300.0));
+    let table = fills_of(page, RED);
+    let table_left = table.iter().map(|r| r.origin.x).fold(f32::MAX, f32::min);
+    assert!(approx(table_left, M));
+    let (text, _) = word_edges(page, "text");
+    let table_right = table
+        .iter()
+        .map(|r| r.origin.x + r.size.width)
+        .fold(f32::MIN, f32::max);
+    assert!(text >= table_right - 0.05, "text beside the floated table");
+}
+
+#[test]
+fn absolute_boxes_are_placed_against_their_positioned_ancestor() {
+    let pages = layout(
+        "<body style='margin:0'><div style='position:relative; width:200pt; height:100pt;
+         border:2pt solid blue'><p style='margin:0'>flow</p>
+         <span style='position:absolute; right:10pt; bottom:5pt'>stamp</span>
+         <div style='position:absolute; left:0; top:0; width:20pt; height:20pt; background:red'></div>
+         </div><p>after</p>",
+    );
+    let page = &pages[0];
+    // The padding box starts inside the 2pt border.
+    let corner = fills_of(page, RED)[0];
+    assert!(approx(corner.origin.x, M + 2.0) && approx(corner.origin.y, M + 2.0));
+    let (_, right) = word_edges(page, "stamp");
+    assert!(approx(right, M + 2.0 + 200.0 - 10.0), "{right}");
+    let stamp = run_with(page, "stamp");
+    assert!(stamp.origin.y > M + 80.0 && stamp.origin.y < M + 2.0 + 100.0);
+    // Out of the flow: the paragraph is at the top, and nothing moved down.
+    assert!(run_with(page, "flow").origin.y < M + 20.0);
+    // Painted above the flow.
+    let flow = paint_index(
+        page,
+        |item| matches!(item, Item::Text(r) if r.covered_text() == "flow"),
+    );
+    let stamp = paint_index(
+        page,
+        |item| matches!(item, Item::Text(r) if r.covered_text() == "stamp"),
+    );
+    let after = paint_index(
+        page,
+        |item| matches!(item, Item::Text(r) if r.covered_text() == "after"),
+    );
+    assert!(flow < stamp && after < stamp);
+}
+
+#[test]
+fn absolute_boxes_without_a_positioned_ancestor_use_the_first_page() {
+    let pages = layout(
+        "<body style='margin:0'><p>text</p><div style='position:absolute; right:0; top:0;
+         width:30pt; height:10pt; background:red'></div>",
+    );
+    let page = &pages[0];
+    let content_width = page.size.width - 2.0 * M;
+    let box_ = fills_of(page, RED)[0];
+    assert!(approx(box_.origin.x + box_.size.width, M + content_width));
+    assert!(approx(box_.origin.y, M));
+}
+
+#[test]
+fn relative_boxes_shift_their_content() {
+    let html = |offsets: &str| {
+        format!(
+            "<body style='margin:0'><div style='position:relative; {offsets}; background:red'>moved</div>"
+        )
+    };
+    let plain = layout(&html("left:0"));
+    let moved = layout(&html("left:15pt; top:4pt"));
+    let a = run_with(&plain[0], "moved");
+    let b = run_with(&moved[0], "moved");
+    assert!(approx(b.origin.x - a.origin.x, 15.0) && approx(b.origin.y - a.origin.y, 4.0));
+    let (a, b) = (fills_of(&plain[0], RED)[0], fills_of(&moved[0], RED)[0]);
+    assert!(approx(b.origin.x - a.origin.x, 15.0) && approx(b.origin.y - a.origin.y, 4.0));
+    // `right` moves it left when `left` is auto.
+    let left = layout(&html("right:5pt"));
+    assert!(approx(
+        run_with(&left[0], "moved").origin.x - a.origin.x,
+        -5.0
+    ));
+}
+
+#[test]
+fn fixed_boxes_repeat_on_every_page() {
+    let lines = "<p>line</p>".repeat(120);
+    let pages = layout(&format!(
+        "<body style='margin:0'><div style='position:fixed; left:10pt; bottom:0;
+         width:40pt; height:12pt; background:red'></div>{lines}"
+    ));
+    assert!(pages.len() > 1);
+    for page in &pages {
+        let mark = fills_of(page, RED);
+        assert_eq!(mark.len(), 1);
+        let bottom = page.size.height - M;
+        assert!(approx(mark[0].origin.y + mark[0].size.height, bottom));
+        assert!(approx(mark[0].origin.x, M + 10.0));
+    }
+}
+
+#[test]
+fn overflow_hidden_clips_and_contains_floats() {
+    let pages = layout(
+        "<body style='margin:0'><div style='width:100pt; overflow:hidden; white-space:nowrap;
+         border:2pt solid blue'>a long line that does not fit in the box at all
+         <div style='float:right; width:20pt; height:50pt; background:red'></div></div>",
+    );
+    let page = &pages[0];
+    let clips: Vec<&Clip> = page
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            Item::Clip(clip) => Some(clip),
+            _ => None,
+        })
+        .collect();
+    assert!(!clips.is_empty());
+    for clip in &clips {
+        assert!(approx(clip.rect.origin.x, M + 2.0) && approx(clip.rect.size.width, 100.0));
+    }
+    // The float is inside a clip, and the box is as tall as it.
+    let border_bottom = fills_of(page, BLUE)
+        .iter()
+        .map(|r| r.origin.y + r.size.height)
+        .fold(f32::MIN, f32::max);
+    assert!(border_bottom >= M + 2.0 + 50.0, "{border_bottom}");
+}
+
+#[test]
+fn the_body_background_covers_every_page() {
+    let lines = "<p>line</p>".repeat(120);
+    let pages = layout(&format!("<body style='background:red'>{lines}"));
+    assert!(pages.len() > 1);
+    for page in &pages {
+        let fills = fills_of(page, RED);
+        assert_eq!(fills.len(), 1, "once, not again for the body box");
+        let area = fills[0];
+        assert!(approx(area.origin.x, M) && approx(area.origin.y, M));
+        assert!(approx(area.size.width, page.size.width - 2.0 * M));
+        assert!(approx(area.size.height, page.size.height - 2.0 * M));
+        assert!(matches!(page.items[0], Item::Fill(_)), "painted first");
+    }
+}
+
+#[test]
+fn linear_gradients_run_across_the_padding_box() {
+    let pages = layout(
+        "<body style='margin:0'><div style='width:100pt; height:40pt;
+         background:linear-gradient(to right, red, blue 75%)'></div>",
+    );
+    let fill = pages[0]
+        .items
+        .iter()
+        .find_map(|item| match item {
+            Item::GradientFill(fill) => Some(fill),
+            _ => None,
+        })
+        .expect("a gradient");
+    assert!(approx(fill.start.x, M) && approx(fill.end.x, M + 100.0));
+    assert!(approx(fill.start.y, M + 20.0) && approx(fill.end.y, M + 20.0));
+    assert_eq!(fill.stops, [(0.0, RED), (0.75, BLUE)]);
+}

@@ -521,6 +521,7 @@ impl Flow<'_, '_> {
             .map(|cell| {
                 let width = grid.span_width(cell.column, cell.span);
                 let mut flow = Flow::new(self.cx);
+                flow.set_root_area((width - cell.horizontal_edges()).max(0.0), None);
                 flow.block_contents(
                     cell.node,
                     &cell.style,

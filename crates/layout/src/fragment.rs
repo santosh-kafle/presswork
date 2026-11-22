@@ -31,6 +31,11 @@ pub enum Item {
     Shape(Shape),
     /// A background image, tiled over an area.
     ImageFill(ImageFill),
+    /// Items painted only within a rectangle: the content of a box with
+    /// `overflow: hidden`.
+    Clip(Clip),
+    /// A linear gradient background.
+    GradientFill(GradientFill),
 }
 
 impl Item {
@@ -44,6 +49,21 @@ impl Item {
                 fill.translate(dx, dy);
                 return self;
             }
+            Item::GradientFill(fill) => {
+                translate_path(&mut fill.clip, dx, dy);
+                for point in [&mut fill.start, &mut fill.end] {
+                    point.x += dx;
+                    point.y += dy;
+                }
+                return self;
+            }
+            Item::Clip(clip) => {
+                clip.rect.origin.x += dx;
+                clip.rect.origin.y += dy;
+                let items = std::mem::take(&mut clip.items);
+                clip.items = items.into_iter().map(|i| i.translate(dx, dy)).collect();
+                return self;
+            }
             _ => {}
         }
         let origin = match &mut self {
@@ -52,7 +72,9 @@ impl Item {
             Item::Image(image) => &mut image.rect.origin,
             Item::Link(link) => &mut link.rect.origin,
             Item::Mark(mark) => &mut mark.origin,
-            Item::Shape(_) | Item::ImageFill(_) => unreachable!("translated above"),
+            Item::Shape(_) | Item::ImageFill(_) | Item::Clip(_) | Item::GradientFill(_) => {
+                unreachable!("translated above")
+            }
         };
         origin.x += dx;
         origin.y += dy;
@@ -129,6 +151,23 @@ fn translate_path(path: &mut [PathOp], dx: f32, dy: f32) {
             PathOp::Close => {}
         }
     }
+}
+
+/// A linear gradient filling `clip`: colors at offsets from 0 at `start`
+/// to 1 at `end`, the colors at the ends continuing beyond them.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GradientFill {
+    pub clip: Vec<PathOp>,
+    pub start: Point,
+    pub end: Point,
+    pub stops: Vec<(f32, Color)>,
+}
+
+/// Items painted only within `rect`.
+#[derive(Debug, Clone)]
+pub struct Clip {
+    pub rect: Rect,
+    pub items: Vec<Item>,
 }
 
 /// An image repeated over an area, side by side with no gaps: a CSS

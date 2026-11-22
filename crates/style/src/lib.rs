@@ -23,12 +23,14 @@ pub mod values;
 
 pub use cascade::{Pseudo, Stylist};
 pub use computed::{
-    BackgroundSize, BorderSide, ComputedStyle, DEFAULT_FONT_SIZE, TextDecorations, TextIndent,
+    BackgroundSize, BorderSide, ComputedStyle, DEFAULT_FONT_SIZE, Gradient, TextDecorations,
+    TextIndent,
 };
 pub use properties::{
-    BorderCollapse, BorderStyle, BoxSizing, Break, BreakInside, Content, ContentItem, Corner,
-    CounterChanges, Display, FontFamilyName, GenericFamily, LineHeight, ListStyleType, TableLayout,
-    TextAlign, TextDecorationLine, TextTransform, VerticalAlign, WhiteSpace,
+    BorderCollapse, BorderStyle, BoxSizing, Break, BreakInside, Clear, Content, ContentItem,
+    Corner, CounterChanges, Display, Float, FontFamilyName, GenericFamily, GradientDirection,
+    LineHeight, ListStyleType, Overflow, Position, TableLayout, TextAlign, TextDecorationLine,
+    TextTransform, VerticalAlign, WhiteSpace,
 };
 pub use stylesheet::{PageRule, PageSizeValue};
 pub use values::{Color, ColorValue, Dimension, Length, Side, Sides};

@@ -19,13 +19,16 @@ use krilla::metadata::Metadata;
 use krilla::num::NormalizedF32;
 use krilla::outline::{Outline, OutlineNode};
 use krilla::page::PageSettings;
-use krilla::paint::{Fill, FillRule, LineCap, LineJoin, Pattern, Stroke, StrokeDash};
+use krilla::paint::{
+    Fill, FillRule, LineCap, LineJoin, LinearGradient, Pattern, SpreadMethod, Stop, Stroke,
+    StrokeDash,
+};
 use krilla::surface::Surface;
 use krilla::text::{Font, GlyphId, KrillaGlyph};
 use krilla::{Data, Document};
 use presswork_layout::{
-    Color, FontData, Image, ImageData, ImageFill, ImageFormat, Item, Link, LinkTarget, MarkKind,
-    Page, PathOp, Shape, ShapePaint, TextRun,
+    Color, FontData, GradientFill, Image, ImageData, ImageFill, ImageFormat, Item, Link,
+    LinkTarget, MarkKind, Page, PathOp, Shape, ShapePaint, TextRun,
 };
 
 /// Document-level options for the generated PDF.
@@ -203,45 +206,7 @@ fn write(
         let mut pdf_page = document.start_page_with(settings);
         let mut surface = pdf_page.surface();
         let mut links = Vec::new();
-        for item in &page.items {
-            match item {
-                Item::Text(run) => {
-                    if let Some(font) = fonts.get(&run.font) {
-                        draw_text(&mut surface, run, font);
-                    }
-                }
-                Item::Image(image) => {
-                    if let Some(pdf_image) = images.get(&image.data) {
-                        draw_image(&mut surface, image, pdf_image);
-                    }
-                }
-                Item::Fill(fill) => {
-                    let rect = fill.rect;
-                    let Some(rect) = Rect::from_xywh(
-                        rect.origin.x,
-                        rect.origin.y,
-                        rect.size.width,
-                        rect.size.height,
-                    ) else {
-                        continue;
-                    };
-                    let mut path = PathBuilder::new();
-                    path.push_rect(rect);
-                    if let Some(path) = path.finish() {
-                        set_color(&mut surface, fill.color);
-                        surface.draw_path(&path);
-                    }
-                }
-                Item::Shape(shape) => draw_shape(&mut surface, shape),
-                Item::ImageFill(fill) => {
-                    if let Some(pdf_image) = images.get(&fill.data) {
-                        draw_image_fill(&mut surface, fill, pdf_image);
-                    }
-                }
-                Item::Link(link) => links.push(link),
-                Item::Mark(_) => {}
-            }
-        }
+        draw_items(&mut surface, &page.items, &mut fonts, images, &mut links);
         surface.finish();
         for link in links {
             if let Some(annotation) = link_annotation(link, &anchors, options) {
@@ -374,6 +339,101 @@ impl<'a> ImageCache<'a> {
 }
 
 /// Sets the fill color for the drawing operations that follow.
+/// Draws `items` in order, collecting their links.
+fn draw_items<'p>(
+    surface: &mut Surface<'_>,
+    items: &'p [Item],
+    fonts: &mut FontCache,
+    images: &mut ImageCache<'_>,
+    links: &mut Vec<&'p Link>,
+) {
+    for item in items {
+        match item {
+            Item::Text(run) => {
+                if let Some(font) = fonts.get(&run.font) {
+                    draw_text(surface, run, font);
+                }
+            }
+            Item::Image(image) => {
+                if let Some(pdf_image) = images.get(&image.data) {
+                    draw_image(surface, image, pdf_image);
+                }
+            }
+            Item::Fill(fill) => {
+                let r = fill.rect;
+                let Some(rect) =
+                    Rect::from_xywh(r.origin.x, r.origin.y, r.size.width, r.size.height)
+                else {
+                    continue;
+                };
+                let mut path = PathBuilder::new();
+                path.push_rect(rect);
+                if let Some(path) = path.finish() {
+                    set_color(surface, fill.color);
+                    surface.draw_path(&path);
+                }
+            }
+            Item::Shape(shape) => draw_shape(surface, shape),
+            Item::ImageFill(fill) => {
+                if let Some(pdf_image) = images.get(&fill.data) {
+                    draw_image_fill(surface, fill, pdf_image);
+                }
+            }
+            Item::Clip(clip) => {
+                let r = clip.rect;
+                let mut path = PathBuilder::new();
+                if let Some(rect) =
+                    Rect::from_xywh(r.origin.x, r.origin.y, r.size.width, r.size.height)
+                {
+                    path.push_rect(rect);
+                }
+                // An empty clip shows nothing.
+                let Some(path) = path.finish() else {
+                    continue;
+                };
+                surface.push_clip_path(&path, &FillRule::NonZero);
+                draw_items(surface, &clip.items, fonts, images, links);
+                surface.pop();
+            }
+            Item::GradientFill(fill) => draw_gradient(surface, fill),
+            Item::Link(link) => links.push(link),
+            Item::Mark(_) => {}
+        }
+    }
+}
+
+/// Fills `fill.clip` with a linear gradient.
+fn draw_gradient(surface: &mut Surface<'_>, fill: &GradientFill) {
+    let Some(area) = build_path(&fill.clip) else {
+        return;
+    };
+    let stops = fill
+        .stops
+        .iter()
+        .map(|&(offset, color)| Stop {
+            offset: NormalizedF32::new(offset).unwrap_or(NormalizedF32::ZERO),
+            color: rgb::Color::new(color.r, color.g, color.b).into(),
+            opacity: NormalizedF32::new(f32::from(color.a) / 255.0).unwrap_or(NormalizedF32::ONE),
+        })
+        .collect();
+    let gradient = LinearGradient {
+        x1: fill.start.x,
+        y1: fill.start.y,
+        x2: fill.end.x,
+        y2: fill.end.y,
+        transform: Transform::identity(),
+        spread_method: SpreadMethod::Pad,
+        stops,
+        anti_alias: false,
+    };
+    surface.set_fill(Some(Fill {
+        paint: gradient.into(),
+        opacity: NormalizedF32::ONE,
+        rule: FillRule::NonZero,
+    }));
+    surface.draw_path(&area);
+}
+
 /// A krilla path from layout's path steps.
 fn build_path(ops: &[PathOp]) -> Option<krilla::geom::Path> {
     let mut path = PathBuilder::new();

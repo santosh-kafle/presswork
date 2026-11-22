@@ -9,7 +9,7 @@ use cssparser::{
 use presswork_dom::resource::Url;
 use selectors::SelectorList;
 
-use crate::properties::{PropertyDeclaration, parse_declaration};
+use crate::properties::{ImageValue, PropertyDeclaration, parse_declaration};
 use crate::selector::{Simple, parse_selector_list};
 use crate::values::{Invalid, Length, PT_PER_PX, Side, Sides};
 
@@ -120,7 +120,8 @@ impl Stylesheet {
     pub(crate) fn resolve_urls(&mut self, base: &Url) {
         for rule in &mut self.rules {
             for declaration in &mut rule.declarations {
-                if let PropertyDeclaration::BackgroundImage(Some(url)) = &mut declaration.property
+                if let PropertyDeclaration::BackgroundImage(Some(ImageValue::Url(url))) =
+                    &mut declaration.property
                     && let Ok(absolute) = base.join(url.trim())
                 {
                     *url = absolute.as_str().into();

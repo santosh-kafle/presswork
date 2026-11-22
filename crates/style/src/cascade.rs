@@ -1,13 +1,15 @@
 //! The cascade: deciding which declarations apply to an element.
 
+use std::collections::HashMap;
+
 use presswork_dom::resource::{Fetcher, Url};
 use presswork_dom::{Document, NodeId};
 use selectors::context::SelectorCaches;
-use selectors::parser::Selector;
+use selectors::parser::{Component, Selector};
 
 use crate::computed::{ComputedStyle, TextDecorations};
 use crate::hints::presentational_hints;
-use crate::properties::{Content, Display, LonghandId, PropertyDeclaration};
+use crate::properties::{Content, Display, Float, LonghandId, Position, PropertyDeclaration};
 use crate::selector::{ElementRef, PseudoElement, Simple};
 use crate::stylesheet::{
     Declaration, FontFace, PageRule, Stylesheet, media_matches, parse_style_attribute,
@@ -64,11 +66,69 @@ struct CascadeRule {
 /// Specificity of a `style=""` attribute: above any selector.
 const INLINE_SPECIFICITY: u32 = u32::MAX;
 
+/// The rules by what their selectors require of an element: an id, a
+/// class or a tag name in the rightmost compound selector. An element is
+/// only matched against the rules it could match.
+#[derive(Debug, Default)]
+struct RuleIndex {
+    by_id: HashMap<String, Vec<usize>>,
+    by_class: HashMap<String, Vec<usize>>,
+    by_tag: HashMap<String, Vec<usize>>,
+    /// Rules with none of those: tried on every element.
+    other: Vec<usize>,
+}
+
+impl RuleIndex {
+    fn add(&mut self, index: usize, selector: &Selector<Simple>) {
+        let mut tag = None;
+        let mut class = None;
+        for component in selector.iter() {
+            match component {
+                Component::ID(id) => {
+                    self.by_id
+                        .entry(id.as_ref().to_owned())
+                        .or_default()
+                        .push(index);
+                    return;
+                }
+                Component::Class(name) => class = class.or(Some(name.as_ref().to_owned())),
+                Component::LocalName(name) => {
+                    tag = tag.or(Some(name.lower_name.as_ref().to_owned()))
+                }
+                _ => {}
+            }
+        }
+        match (class, tag) {
+            (Some(class), _) => self.by_class.entry(class).or_default().push(index),
+            (None, Some(tag)) => self.by_tag.entry(tag).or_default().push(index),
+            (None, None) => self.other.push(index),
+        }
+    }
+
+    /// The rules an element with this tag name, id and classes could
+    /// match, in source order.
+    fn candidates(&self, tag: &str, id: Option<&str>, classes: &str) -> Vec<usize> {
+        let mut found: Vec<usize> = self.other.clone();
+        let mut take = |bucket: Option<&Vec<usize>>| found.extend(bucket.into_iter().flatten());
+        take(self.by_tag.get(tag));
+        if let Some(id) = id {
+            take(self.by_id.get(id));
+        }
+        for class in classes.split_ascii_whitespace() {
+            take(self.by_class.get(class));
+        }
+        found.sort_unstable();
+        found.dedup();
+        found
+    }
+}
+
 /// All the styles of one document; computes the style of its elements.
 #[derive(Debug)]
 pub struct Stylist {
     /// In source order, which is also cascade order within a level.
     rules: Vec<CascadeRule>,
+    index: RuleIndex,
     blocks: Vec<Vec<Declaration>>,
     page: PageRule,
     font_faces: Vec<FontFace>,
@@ -85,6 +145,7 @@ impl Stylist {
     pub fn new() -> Self {
         let mut stylist = Self {
             rules: Vec::new(),
+            index: RuleIndex::default(),
             blocks: Vec::new(),
             page: PageRule::default(),
             font_faces: Vec::new(),
@@ -213,6 +274,7 @@ impl Stylist {
                     // Other pseudo-elements (`::marker`) are not supported.
                     Some(PseudoElement::Other) => continue,
                 };
+                self.index.add(self.rules.len(), selector);
                 self.rules.push(CascadeRule {
                     origin,
                     pseudo,
@@ -233,7 +295,18 @@ impl Stylist {
     ) -> Vec<(Level, u32, PropertyDeclaration)> {
         let mut applicable = Vec::new();
         let mut caches = SelectorCaches::default();
-        for rule in self.rules.iter().filter(|rule| rule.pseudo == pseudo) {
+        let doc = element.document();
+        let candidates = match doc.element(element.node()) {
+            // In quirks mode, ids and classes match case-insensitively.
+            Some(data) if !doc.quirks_mode => self.index.candidates(
+                &data.name,
+                data.attr("id"),
+                data.attr("class").unwrap_or_default(),
+            ),
+            _ => (0..self.rules.len()).collect(),
+        };
+        let rules = candidates.into_iter().map(|index| &self.rules[index]);
+        for rule in rules.filter(|rule| rule.pseudo == pseudo) {
             if !element.matches(&rule.selector, pseudo.is_some(), &mut caches) {
                 continue;
             }
@@ -357,6 +430,17 @@ impl Stylist {
             style.apply(declaration, parent);
         }
 
+        // Absolutely positioned boxes do not float; they and floats are
+        // blocks (CSS 2.1 section 9.7).
+        if matches!(style.position, Position::Absolute | Position::Fixed) {
+            style.float = Float::None;
+        }
+        if (style.float != Float::None
+            || matches!(style.position, Position::Absolute | Position::Fixed))
+            && matches!(style.display, Display::Inline | Display::InlineBlock)
+        {
+            style.display = Display::Block;
+        }
         // The root element always generates a block box.
         if is_root && matches!(style.display, Display::Inline | Display::InlineBlock) {
             style.display = Display::Block;
@@ -657,6 +741,44 @@ mod tests {
             "file:///site/fonts/brand.ttf"
         );
         assert_eq!(faces[1].base, None);
+    }
+
+    #[test]
+    fn absolute_boxes_are_blocks_that_do_not_float() {
+        let style = style_of(
+            "<style>span { position: absolute; float: left; inset: 1px auto auto 5% }</style><p><span>x</span>",
+            "span",
+        );
+        assert_eq!(style.position, Position::Absolute);
+        assert_eq!(style.float, Float::None);
+        assert_eq!(style.display, Display::Block);
+        assert_eq!(style.inset.top, Dimension::Pt(0.75));
+        assert_eq!(style.inset.right, Dimension::Auto);
+        assert_eq!(style.inset.left, Dimension::Percent(0.05));
+    }
+
+    #[test]
+    fn indexed_rules_keep_source_order() {
+        // Rules found by class, tag and id are merged back into source
+        // order: the later of equally specific rules wins.
+        let html = "<style>.b { color: red } .a { color: blue } p { text-align: left }
+                    p { text-align: right } #x { font-size: 20pt } *#x { font-size: 30pt }
+                    </style><p id=x class='a b'>t";
+        let style = style_of(html, "p");
+        assert_eq!(style.color, Color::rgb(0, 0, 255));
+        assert_eq!(style.text_align, TextAlign::Right);
+        assert_eq!(style.font_size, 30.0);
+    }
+
+    #[test]
+    fn floats_become_blocks() {
+        let style = style_of(
+            "<style>span { float: right; clear: left }</style><p><span>x</span>",
+            "span",
+        );
+        assert_eq!(style.float, Float::Right);
+        assert_eq!(style.clear, crate::properties::Clear::Left);
+        assert_eq!(style.display, Display::Block);
     }
 
     #[test]

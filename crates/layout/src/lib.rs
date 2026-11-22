@@ -35,8 +35,8 @@ pub use presswork_dom::resource::{DataUrls, Fetcher, LoadError, LoadFailure, Loa
 use presswork_style::Stylist;
 
 pub use fragment::{
-    Color, Fill, FontData, Glyph, Image, ImageData, ImageFill, ImageFormat, Item, Link, LinkTarget,
-    Mark, MarkKind, Page, PathOp, Shape, ShapePaint, TextRun,
+    Clip, Color, Fill, FontData, Glyph, GradientFill, Image, ImageData, ImageFill, ImageFormat,
+    Item, Link, LinkTarget, Mark, MarkKind, Page, PathOp, Shape, ShapePaint, TextRun,
 };
 pub use geometry::{EdgeSizes, Point, Rect, Size};
 pub use margin::{Band, BandStyle, BandText, MarginDocument};
@@ -121,6 +121,7 @@ impl Engine {
     ) -> Vec<Page> {
         let margins = options.margins;
         let width = (options.page_size.width - margins.left - margins.right).max(0.0);
+        let height = (options.page_size.height - margins.top - margins.bottom).max(0.0);
 
         let generated = flow::generated::resolve(doc, styles);
         let mut context = flow::Context {
@@ -134,14 +135,39 @@ impl Engine {
             web_fonts: flow::WebFonts::new(styles.font_faces(), self.layouts),
             load_images: options.images,
             images: HashMap::new(),
+            page: Size::new(width, height),
+            fixed: Vec::new(),
+            page_background_owner: None,
         };
         self.layouts += 1;
         let mut flow = flow::Flow::new(&mut context);
+        // The initial containing block of absolutely positioned boxes is
+        // the first page's content area.
+        flow.set_root_area(width, Some(height));
+        let mut page_background = None;
         if let Some(root) = doc.document_element() {
             let style = styles.style(doc, root, None);
+            // The root's background, or else the body's, covers the pages.
+            let body = doc
+                .children(root)
+                .find(|&child| doc.element(child).is_some_and(|e| e.name == "body"));
+            let owner = match flow.background_paint(&style) {
+                Some(paint) => Some((root, paint)),
+                None => body.and_then(|body| {
+                    let body_style = styles.style(doc, body, Some(&style));
+                    flow.background_paint(&body_style)
+                        .map(|paint| (body, paint))
+                }),
+            };
+            if let Some((owner, paint)) = owner {
+                flow.set_page_background_owner(owner);
+                page_background = Some(paint);
+            }
             flow.block(root, &style, 0.0, width);
         }
-        let (canvas, _height) = flow.finish();
+        let (mut canvas, _height) = flow.finish();
+        canvas.fixed = std::mem::take(&mut context.fixed);
+        canvas.page_background = page_background;
         context.web_fonts.unregister(context.fonts);
         paginate::paginate(canvas, options.page_size, margins)
     }

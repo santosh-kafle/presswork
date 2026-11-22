@@ -17,6 +17,8 @@ struct Sheet {
     header: f32,
     boxes: Vec<Item>,
     content: Vec<Item>,
+    /// Positioned boxes, painted above the content.
+    top: Vec<Item>,
 }
 
 /// A repeated header taller than this fraction of the page is not
@@ -38,6 +40,7 @@ pub(crate) fn paginate(canvas: Canvas, size: Size, margins: EdgeSizes) -> Vec<Pa
         header,
         boxes: Vec::new(),
         content: Vec::new(),
+        top: Vec::new(),
     };
 
     let mut starts = page_starts(&canvas.slices, available)
@@ -61,7 +64,12 @@ pub(crate) fn paginate(canvas: Canvas, size: Size, margins: EdgeSizes) -> Vec<Pa
         }
         let current = sheets.last_mut().expect("at least one page");
         let y = margins.top + current.header + (slice.top - current.offset) as f32;
-        current.content.extend(
+        let layer = if slice.on_top {
+            &mut current.top
+        } else {
+            &mut current.content
+        };
+        layer.extend(
             slice
                 .items
                 .into_iter()
@@ -112,8 +120,27 @@ pub(crate) fn paginate(canvas: Canvas, size: Size, margins: EdgeSizes) -> Vec<Pa
     sheets
         .into_iter()
         .map(|sheet| {
-            let mut items = sheet.boxes;
+            let mut items = Vec::new();
+            if let Some(paint) = &canvas.page_background {
+                let area = Rect::new(
+                    margins.left,
+                    margins.top,
+                    size.width - margins.left - margins.right,
+                    size.height - margins.top - margins.bottom,
+                );
+                paint.fills(area, &mut items);
+            }
+            items.extend(sheet.boxes);
             items.extend(sheet.content);
+            items.extend(sheet.top);
+            // Fixed boxes on every page, above everything.
+            items.extend(
+                canvas
+                    .fixed
+                    .iter()
+                    .cloned()
+                    .map(|item| item.translate(margins.left, margins.top)),
+            );
             Page { size, items }
         })
         .collect()
@@ -218,13 +245,14 @@ mod tests {
             break_before: false,
             keep: Keep::default(),
             header: None,
+            on_top: false,
         }
     }
 
     fn canvas(slices: Vec<Slice>) -> Canvas {
         Canvas {
             slices,
-            decorations: Vec::new(),
+            ..Canvas::default()
         }
     }
 

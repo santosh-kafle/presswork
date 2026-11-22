@@ -148,7 +148,7 @@ pub(super) struct InlineObject {
 }
 
 /// How far, in points, a line may exceed its width and still fit.
-const FIT_TOLERANCE: f32 = 0.001;
+pub(super) const FIT_TOLERANCE: f32 = 0.001;
 
 /// The start or end of an inline element not yet placed.
 const OPEN: usize = usize::MAX;
@@ -723,7 +723,11 @@ impl Flow<'_, '_> {
         // Content measured to fit `width` exactly (a table cell sized to
         // its max-content width) can exceed it by a rounding error, as
         // parley sums advances in another order when breaking.
-        layout.break_all_lines(Some(width + FIT_TOLERANCE));
+        if self.floats_below(self.y) {
+            self.break_around_floats(&mut layout, x, width);
+        } else {
+            layout.break_all_lines(Some(width + FIT_TOLERANCE));
+        }
 
         let marker = self.marker.take();
         let count = layout.len();

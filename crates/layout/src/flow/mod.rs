@@ -25,10 +25,12 @@
 
 mod border;
 mod boxes;
+mod float;
 mod fonts;
 pub(crate) mod generated;
 mod inline;
 mod inline_block;
+mod position;
 mod replaced;
 mod table;
 mod webfonts;
@@ -40,10 +42,13 @@ use std::sync::Arc;
 use parley::{FontContext, LayoutContext};
 use presswork_dom::resource::{Fetcher, LoadError};
 use presswork_dom::{Document, ElementData, NodeId, NodeKind};
-use presswork_style::{Break, BreakInside, ComputedStyle, Dimension, Display, Pseudo, Stylist};
+use presswork_style::{
+    Break, BreakInside, ComputedStyle, Dimension, Display, Float, Overflow, Position, Pseudo,
+    Stylist,
+};
 
-use crate::fragment::{ImageData, Item, LinkTarget, Mark, MarkKind};
-use crate::geometry::{Point, Rect};
+use crate::fragment::{Clip, ImageData, Item, LinkTarget, Mark, MarkKind};
+use crate::geometry::{Point, Rect, Size};
 use border::BackgroundImage;
 pub(crate) use border::BoxPaint;
 use boxes::BoxGeometry;
@@ -71,6 +76,8 @@ pub(crate) struct Slice {
     pub keep: Keep,
     /// Table header to repeat above this slice when it starts a page.
     pub header: Option<Rc<RepeatedHeader>>,
+    /// A positioned box: painted above the content in the flow.
+    pub on_top: bool,
 }
 
 /// Why a slice should not be separated from the slice before it. A page
@@ -115,6 +122,12 @@ pub(crate) struct Canvas {
     pub slices: Vec<Slice>,
     /// In paint order: a box comes before its descendants.
     pub decorations: Vec<Decoration>,
+    /// Fixed positioned boxes, relative to the page's content area, drawn
+    /// on every page.
+    pub fixed: Vec<Item>,
+    /// The background of every page's content area (the root's or the
+    /// body's, CSS Backgrounds 3 section 2.11).
+    pub page_background: Option<BoxPaint>,
 }
 
 impl Canvas {
@@ -130,7 +143,10 @@ impl Canvas {
             );
             decoration.paint.fills(rect, out);
         }
-        for slice in self.slices {
+        // Positioned boxes last, above the rest.
+        let (top, flow): (Vec<Slice>, Vec<Slice>) =
+            self.slices.into_iter().partition(|slice| slice.on_top);
+        for slice in flow.into_iter().chain(top) {
             let dy = slice.top as f32 + dy;
             out.extend(slice.items.into_iter().map(|item| item.translate(dx, dy)));
         }
@@ -162,6 +178,14 @@ pub(crate) struct Context<'a> {
     pub images: HashMap<String, Option<Arc<ImageData>>>,
     /// The `::before` and `::after` boxes of the document.
     pub generated: &'a generated::GeneratedContent,
+    /// The page's content area: the containing block of fixed boxes.
+    pub page: Size,
+    /// Fixed positioned boxes laid out so far, relative to the page's
+    /// content area.
+    pub fixed: Vec<Item>,
+    /// The element whose background covers every page instead of its own
+    /// box: the root, or the body if the root has none.
+    pub page_background_owner: Option<NodeId>,
 }
 
 impl Context<'_> {
@@ -249,6 +273,21 @@ pub(crate) struct Flow<'c, 'a> {
     /// Marks for the boxes just opened, with their left edges: they go
     /// at the top of the next slice, the boxes' first content.
     pending_marks: Vec<(f32, MarkKind)>,
+    /// The floats placed in this flow, which content flows around.
+    floats: Vec<float::FloatBox>,
+    /// Slices that start above this are beside a float, and stay with it.
+    float_keep_until: f64,
+    /// A float was placed below later content: the slices need sorting.
+    unsorted: bool,
+    /// The positioned boxes open, innermost last.
+    positioned: Vec<position::ContainingBlock>,
+    /// Absolutely positioned boxes placed against the flow's own area.
+    root_absolutes: Vec<position::Absolute>,
+    /// The width of the flow's own area.
+    root_width: f32,
+    /// The height of the flow's own area, if not its content's: the first
+    /// page for the document.
+    root_height: Option<f32>,
 }
 
 /// A box entered with [`Flow::open_box`].
@@ -283,7 +322,27 @@ impl<'c, 'a> Flow<'c, 'a> {
             baseline: None,
             link: None,
             pending_marks: Vec::new(),
+            floats: Vec::new(),
+            float_keep_until: f64::NEG_INFINITY,
+            unsorted: false,
+            positioned: Vec::new(),
+            root_absolutes: Vec::new(),
+            root_width: 0.0,
+            root_height: None,
         }
+    }
+
+    /// Makes `owner`'s background cover the pages instead of its box.
+    pub fn set_page_background_owner(&mut self, owner: NodeId) {
+        self.cx.page_background_owner = Some(owner);
+    }
+
+    /// Sets the area of the flow itself, which absolutely positioned boxes
+    /// without a positioned ancestor are placed in: `width` wide, and as
+    /// tall as `height` or else its content.
+    pub fn set_root_area(&mut self, width: f32, height: Option<f32>) {
+        self.root_width = width;
+        self.root_height = height;
     }
 
     /// Asks for the canvas position of `id`'s border box, which
@@ -303,6 +362,18 @@ impl<'c, 'a> Flow<'c, 'a> {
     /// Finishes the flow, returning its content and total height.
     pub fn finish(mut self) -> (Canvas, f64) {
         self.settle_margin();
+        // A flow of its own contains its floats (a block formatting
+        // context: the root, cells, inline-blocks, floats).
+        if let Some(bottom) = self.floats_bottom() {
+            self.y = self.y.max(bottom);
+        }
+        if !self.root_absolutes.is_empty() {
+            let bottom = self.root_height.map_or(self.y, f64::from);
+            self.place_root_absolutes(0.0, bottom);
+        }
+        if self.unsorted {
+            self.canvas.slices.sort_by(|a, b| a.top.total_cmp(&b.top));
+        }
         if !self.pending_marks.is_empty() {
             // Empty boxes at the end still have a place to link to.
             self.push_slice(self.y, 0.0, Vec::new());
@@ -354,9 +425,11 @@ impl<'c, 'a> Flow<'c, 'a> {
             break_before: std::mem::take(&mut self.force_break),
             keep: Keep {
                 tight: std::mem::take(&mut self.keep_next),
-                inside: false,
+                // Beside a float: on its page.
+                inside: top < self.float_keep_until,
             },
             header: None,
+            on_top: false,
         });
     }
 
@@ -374,10 +447,36 @@ impl<'c, 'a> Flow<'c, 'a> {
             return self.block_image(id, style, x, width);
         }
         if style.display == Display::Table {
+            self.clear_floats(style.clear);
             self.mark_element(id, x);
             return self.table(id, style, x, width);
         }
+        if self.cx.page_background_owner == Some(id) {
+            // Its background is the pages'.
+            let mut style = style.clone();
+            style.background_color = presswork_style::Color::TRANSPARENT;
+            style.background_image = None;
+            style.background_gradient = None;
+            return self.block_box(Source::Element(id), &style, x, width);
+        }
         self.block_box(Source::Element(id), style, x, width);
+    }
+
+    /// The background of `style` alone, with its image loaded, if it has
+    /// one.
+    pub fn background_paint(&mut self, style: &ComputedStyle) -> Option<BoxPaint> {
+        let image = (style.background_image.as_deref())
+            .and_then(|url| self.cx.image(url))
+            .map(|data| BackgroundImage::new(style, data));
+        let gradient = style.background_gradient.clone();
+        let visible =
+            !style.background_color.is_transparent() || image.is_some() || gradient.is_some();
+        visible.then_some(BoxPaint {
+            background: style.background_color,
+            image,
+            gradient,
+            ..BoxPaint::INVISIBLE
+        })
     }
 
     /// The background and borders of a box in `style`, with its background
@@ -447,6 +546,7 @@ impl<'c, 'a> Flow<'c, 'a> {
 
     /// Lays out a block container holding `source`.
     fn block_box(&mut self, source: Source<'_>, style: &ComputedStyle, x: f32, width: f32) {
+        self.clear_floats(style.clear);
         let geometry = BoxGeometry::resolve(style, width, None);
         if self.is_measuring()
             && let Dimension::Pt(_) = style.width
@@ -473,11 +573,28 @@ impl<'c, 'a> Flow<'c, 'a> {
         };
         let min_height = geometry.min_content_height(style);
         let sized = min_height > 0.0 && !self.is_measuring();
+        let positioned = style.position != Position::Static && !self.is_measuring();
+        let clipped = style.overflow == Overflow::Hidden && !self.is_measuring();
+        let first_float = self.floats.len();
+        let (first_slice, first_decoration) =
+            (self.canvas.slices.len(), self.canvas.decorations.len());
         // A box with a height needs a decoration to know where its content
-        // starts.
-        let open = self.open_box(style, &geometry, x, tracked || sized);
+        // starts, and a positioned one where it ends.
+        let open = self.open_box(
+            style,
+            &geometry,
+            x,
+            tracked || sized || positioned || clipped,
+        );
         if tracked && let Some((_, index)) = &mut self.tracked {
             *index = open.decoration;
+        }
+        if positioned && let Some(decoration) = open.decoration {
+            let padding_x = x + geometry.border_box_x() + geometry.border.left;
+            let padding_width =
+                geometry.border_box_width() - geometry.border.left - geometry.border.right;
+            let borders = (geometry.border.top, geometry.border.bottom);
+            self.open_containing_block(padding_x, padding_width, decoration, borders);
         }
         self.contents(
             source,
@@ -489,7 +606,67 @@ impl<'c, 'a> Flow<'c, 'a> {
         if sized && let Some(index) = open.decoration {
             self.extend_to(index, geometry.top_edge(), min_height);
         }
+        if style.overflow == Overflow::Hidden
+            && let Some(bottom) = self.floats[first_float..]
+                .iter()
+                .map(|f| f.bottom())
+                .reduce(f64::max)
+        {
+            // A new block formatting context contains its floats.
+            self.settle_margin();
+            self.y = self.y.max(bottom);
+        }
+        let decoration = open.decoration;
         self.close_box(style, &geometry, open);
+        if clipped && let Some(index) = decoration {
+            let padding = Rect::new(
+                x + geometry.border_box_x() + geometry.border.left,
+                0.0,
+                geometry.border_box_width() - geometry.border.left - geometry.border.right,
+                0.0,
+            );
+            self.clip_slices(index, padding, &geometry, first_slice);
+        }
+        if positioned && decoration.is_some() {
+            self.close_containing_block();
+            if style.position == Position::Relative {
+                self.shift_relative(style, width, first_slice, first_decoration);
+            }
+        }
+    }
+
+    /// Clips the content laid out in slices from `first_slice` to the
+    /// padding box of the box whose decoration is `decoration`, from
+    /// `padding.origin.x`, `padding.size.width` wide. Links and marks stay
+    /// outside the clip, where they are found.
+    fn clip_slices(
+        &mut self,
+        decoration: usize,
+        padding: Rect,
+        geometry: &BoxGeometry,
+        first_slice: usize,
+    ) {
+        let box_ = &self.canvas.decorations[decoration];
+        let top = box_.top + f64::from(geometry.border.top);
+        let bottom = (box_.bottom - f64::from(geometry.border.bottom)).max(top);
+        for slice in &mut self.canvas.slices[first_slice..] {
+            let (kept, clipped): (Vec<Item>, Vec<Item>) = std::mem::take(&mut slice.items)
+                .into_iter()
+                .partition(|item| matches!(item, Item::Link(_) | Item::Mark(_)));
+            slice.items = kept;
+            if !clipped.is_empty() {
+                let rect = Rect::new(
+                    padding.origin.x,
+                    (top - slice.top) as f32,
+                    padding.size.width,
+                    (bottom - top) as f32,
+                );
+                slice.items.push(Item::Clip(Clip {
+                    rect,
+                    items: clipped,
+                }));
+            }
+        }
     }
 
     /// Starts a box: top margin, border and padding, and its decoration.
@@ -637,6 +814,16 @@ impl<'c, 'a> Flow<'c, 'a> {
                 NodeKind::Element(element) => {
                     let child_style = self.cx.styles.style(doc, child, Some(style));
                     let display = child_style.display;
+                    if matches!(child_style.position, Position::Absolute | Position::Fixed)
+                        && display != Display::None
+                    {
+                        self.positioned_element(child, &child_style, x);
+                        continue;
+                    }
+                    if child_style.float != Float::None && display != Display::None {
+                        self.float_element(child, &child_style, x, width);
+                        continue;
+                    }
                     if matches!(display, Display::Inline | Display::InlineBlock)
                         && let Some(name) = anchor_name(element)
                     {

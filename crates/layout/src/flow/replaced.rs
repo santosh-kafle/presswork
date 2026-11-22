@@ -138,9 +138,24 @@ impl Flow<'_, '_> {
         width: f32,
         inline: &mut Inline,
     ) {
+        match self.image_object(id, style, width) {
+            Ok(object) => inline.push_box(object, style),
+            Err(alt) => inline.push_text(&alt, style),
+        }
+    }
+
+    /// The image element `id` as an atomic box, margins included, in a
+    /// containing block `width` wide; or its alt text if it has no image
+    /// and no size.
+    pub(super) fn image_object(
+        &mut self,
+        id: NodeId,
+        style: &ComputedStyle,
+        width: f32,
+    ) -> Result<InlineObject, String> {
         let (data, size) = match self.image_content(id, style, width) {
             Content::Image { data, size } => (data, size),
-            Content::Alt(alt) => return inline.push_text(&alt, style),
+            Content::Alt(alt) => return Err(alt),
         };
         let basis = if self.is_measuring() { 0.0 } else { width };
         // Auto margins are zero on inline boxes.
@@ -178,14 +193,13 @@ impl Flow<'_, '_> {
         } else {
             outer_width
         };
-        let object = InlineObject::new(
+        Ok(InlineObject::new(
             outer_width,
             outer_height,
             min_width.max(0.0),
             style.vertical_align,
             items,
-        );
-        inline.push_box(object, style);
+        ))
     }
 
     /// Lays out the image element `id` as a block in a containing block
