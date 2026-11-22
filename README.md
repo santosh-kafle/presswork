@@ -69,9 +69,10 @@ maintained, and accepts the same command line.
   to cells and `<col>`s (columns with a width keep it; the others share
   the rest), with `colspan` and `rowspan`, cell borders and backgrounds,
   and collapsed borders, where the borders of cells, rows, row groups,
-  columns and the table meet and the strongest wins, as in browsers. Rows are never split across pages, nor are rows
-  joined by a `rowspan` cell; `<thead>` rows repeat at the top of every
-  page, and a header is never left alone at the bottom of a page.
+  columns and the table meet and the strongest wins, as in browsers. Rows
+  are never split across pages, nor are rows joined by a `rowspan` cell;
+  `<thead>` rows repeat at the top of every page, and a header is never
+  left alone at the bottom of a page.
 - **Pagination.** Pages break between lines and table rows; backgrounds and
   borders continue across the break. `@page { size; margin }` is honored.
   A box with `break-inside: avoid` moves to the next page whole when it
@@ -174,7 +175,8 @@ cat invoice.html | presswork --quiet - - > invoice.pdf
   smart shrinking) may lay out differently.
 - **Boxes grow to fit.** Content taller than a box's `height` makes the box
   taller instead of overflowing it, so text never runs into what follows.
-  `overflow` is not supported.
+  `overflow: hidden` clips content that is too wide, but not content that
+  is too tall, since the box grows to hold it.
 - **Page breaks.** wkhtmltopdf ignores `orphans` and `widows` and can cut
   a line of text in half at a page break. presswork never splits a line,
   keeps at least two lines of a paragraph on each page (the CSS default),
